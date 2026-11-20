@@ -24,7 +24,7 @@ Postmanager is a TikTok-first creation and publishing workspace for Tanzanian cr
 - Build the first backend and generation workflow in Python.
 - Use Neon PostgreSQL for hosted application data. Keep schema changes and application code in GitHub; keep database credentials out of the repository.
 - Adapt SMS Desk's Beem phone verification flow to the new application, with separate credentials and Postmanager-specific user and OTP tables.
-- Plan a later TypeScript implementation for Netlify serverless deployment. Check video rendering and job duration against serverless limits before moving that work.
+- Run the creator-facing API in TypeScript on Netlify Functions, while retaining the Python implementation as a reference and for later long-running publishing or rendering work.
 - Store prompt templates in version control so generation behavior can be reviewed and improved.
 - Store video files privately in Neon Object Storage; Neon Postgres holds account, draft, queue, publishing, and analytics records.
 
@@ -65,6 +65,8 @@ Build one complete TikTok workflow: phone sign-in, TikTok connection, a local dr
 
 The Python app now includes SMS Desk-style Beem phone authentication, TikTok OAuth and creator settings, private MP4 upload with signed previews, draft editing, queue slots, exact-time scheduling, explicit posting approval, and a worker for Direct Post status and basic metrics. AI video creation and licensed music selection remain next-phase work.
 
+The `feat/netlify-serverless` branch adds a TypeScript Netlify API for phone sign-in, private MP4 uploads, draft editing, queue settings, and exact-time planning. Queued and scheduled posts are deliberately stored with `approved_at = NULL`; they cannot be picked up by the existing Python publishing worker. TikTok OAuth, Direct Post, analytics sync, AI generation, and music selection are not yet available in the Netlify app. Publishing will need a new creator review after TikTok is connected.
+
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
@@ -74,5 +76,13 @@ python3 -m venv .venv
 Open `http://127.0.0.1:8000`. Run `.venv/bin/python -m postmanager.worker --loop` separately when TikTok publishing is configured. The app's private video upload limit is 500 MiB.
 
 Phone sign-in needs `BEEM_AUTHORIZATION` in `key:secret` form and `BEEM_SOURCE_ADDR`. Its default `OTP_DAILY_LIMIT` is 1,000 code sends per rolling 24 hours. TikTok connection needs `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, an HTTPS `APP_BASE_URL`, and the registered `/api/tiktok/callback` redirect. The requested scopes are `user.info.basic`, `video.publish`, and `video.list`. The local HTTP URL is for app development; TikTok OAuth needs HTTPS.
+
+## Deploy the Netlify branch
+
+1. In [Netlify](https://app.netlify.com/start), import the GitHub repository `Johnndelembi/postmanager`. Select `feat/netlify-serverless` as the production branch for the first site. The repo's `netlify.toml` sets the build command, `public` directory, API rewrite, and Functions directory. `.nvmrc` selects Node 24.
+2. In **Project configuration → Environment variables**, add the following names with the values from your ignored local `.env` file. Set their scope to **Functions** (or all scopes) and include the **Production** deploy context: `DATABASE_URL`, `SESSION_SECRET`, `BEEM_SOURCE_ADDR`, `BEEM_AUTHORIZATION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION`. `OTP_DAILY_LIMIT` is optional. Never put their values in `netlify.toml` or GitHub. `APP_BASE_URL`, `DATABASE_URL_UNPOOLED`, and the TikTok variables are not needed by this branch's Functions yet.
+3. Deploy. Open `https://<your-site>.netlify.app/api/health`; it returns `{"ok":true}` when the Function reaches Neon. Then open the site, sign in by SMS, upload an MP4, save a draft, and add it to the queue or schedule it. The video goes straight from the browser to the private Neon `videos` bucket through a short-lived signed URL, because Netlify Functions cannot accept a 500 MB upload body.
+
+The existing bucket CORS rule permits signed browser uploads. After the site has its final URL, narrow the bucket's allowed origins to that exact Netlify origin (and any preview/local origins you use). A single PUT supports the current 500 MB cap, but uploads above 100 MB cannot resume yet, and abandoned uploads have no cleanup job. The app does not automatically publish planned posts. The public HTTPS URL enables the next step: register TikTok's OAuth redirect and configure a verified video-delivery prefix.
 
 The repo's `.codex/config.toml` connects the Neon MCP server, and `AGENTS.md` records the branch-first workflow from the [Neon agent setup guide](https://neon.com/prompts/agent-setup.md).

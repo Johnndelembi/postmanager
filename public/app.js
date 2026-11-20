@@ -118,7 +118,7 @@ async function loadTikTok() {
     const status = $("tiktokStatus");
     const connect = $("connectTikTok");
     if (state.tiktok.configured === false) {
-      status.textContent = "TikTok connection is unavailable right now.";
+      status.textContent = "Plan privately for now. TikTok connection is the next setup step after deployment; planned posts will stay on hold until you review them for publishing.";
       connect.hidden = true;
       state.creatorInfo = null;
     } else if (state.tiktok.connected) {
@@ -184,7 +184,7 @@ function applyCreatorInfo() {
   const options = state.creatorInfo && Array.isArray(state.creatorInfo.privacy_level_options)
     ? state.creatorInfo.privacy_level_options : [];
   select.replaceChildren();
-  const placeholder = make("option", "", state.tiktok.connected ? "Choose who can watch" : "Connect TikTok to choose");
+  const placeholder = make("option", "", state.tiktok.connected ? "Choose who can watch" : "Choose after connecting TikTok");
   placeholder.value = "";
   select.append(placeholder);
   for (const value of options) {
@@ -281,7 +281,7 @@ function renderPosts() {
   const posts = filteredPosts();
   if (!posts.length) {
     const content = state.filter === "all"
-      ? ["Your planner starts here", "Save your first draft above. You can queue it once its video and TikTok settings are ready."]
+      ? ["Your planner starts here", "Save your first draft above. You can queue it after uploading a video, even before connecting TikTok."]
       : ["Nothing in this view yet", "Posts will appear here as you move them through your planner."];
     list.append(emptyState(content[0], content[1]));
     return;
@@ -296,12 +296,19 @@ function emptyState(title, detail) {
 }
 
 function readinessIssue(post) {
-  if (!state.tiktok.connected) return "Connect TikTok before posting.";
-  if (!state.creatorInfo) return "TikTok posting settings are unavailable. Refresh the page and try again.";
   if (!post.media_asset_id) return "Upload an MP4 video before posting.";
   if (!safePreviewUrl(post.preview_url)) return "Video preview is unavailable. Refresh and try again.";
   const duration = Number(post.duration_seconds);
   if (!Number.isFinite(duration) || duration <= 0) return "Add the video length before posting.";
+  return "";
+}
+
+function publishingIssue(post) {
+  const issue = readinessIssue(post);
+  if (issue) return issue;
+  if (!state.tiktok.connected) return "Connect TikTok before publishing.";
+  if (!state.creatorInfo) return "TikTok posting settings are unavailable. Refresh the page and try again.";
+  const duration = Number(post.duration_seconds);
   const max = Number(state.creatorInfo.max_video_post_duration_sec);
   if (Number.isFinite(max) && max > 0 && duration > max) return "This video exceeds your TikTok account's maximum length.";
   const options = state.creatorInfo.privacy_level_options || [];
@@ -332,6 +339,9 @@ function postRow(post) {
   const badge = make("span", "status-badge " + String(post.status || "draft"), String(post.status || "draft").replaceAll("_", " "));
   top.append(titleWrap, badge);
   row.append(top);
+  if (["queued", "scheduled"].includes(post.status) && !post.approved_at) {
+    row.append(make("p", "field-help", "Planned privately. It will stay on hold until TikTok is connected and you approve publishing."));
+  }
   if (post.caption) row.append(make("p", "post-caption", post.caption));
 
   const settings = make("div", "post-meta");
@@ -381,23 +391,19 @@ function postRow(post) {
     const approval = make("label", "post-approval");
     const checkbox = make("input");
     checkbox.type = "checkbox";
-    const declaration = post.brand_content_toggle
-      ? "By posting, you agree to TikTok's Branded Content Policy and Music Usage Confirmation."
-      : "By posting, you agree to TikTok's Music Usage Confirmation.";
-    approval.append(checkbox, make("span", "", "I reviewed the video, caption, and TikTok settings for " + (post.title || "this draft") + " and approve this post. " + declaration));
+    approval.append(checkbox, make("span", "", "I reviewed the video and caption for " + (post.title || "this draft") + ". I understand this is a private plan until I separately approve TikTok publishing."));
     row.append(approval);
     const issue = readinessIssue(post);
     if (issue) row.append(make("p", "field-help", issue));
-    if (state.tiktok.connected && state.tiktok.publishing_ready !== true) {
-      row.append(make("p", "field-help", "Publish now is unavailable. Queued and scheduled posts will be held until publishing is enabled."));
-    }
+    if (!state.tiktok.connected) row.append(make("p", "field-help", "Queue and schedule now; publishing will require a later TikTok review."));
     const queue = actionButton("Add to queue", "button-secondary", () => postAction(post, "queue", checkbox));
     const publish = actionButton("Publish now", "button-primary", () => postAction(post, "publish", checkbox));
+    publish.hidden = !state.tiktok.connected;
     queue.disabled = true;
     publish.disabled = true;
     checkbox.addEventListener("change", () => {
       queue.disabled = !checkbox.checked || Boolean(readinessIssue(post));
-      publish.disabled = !checkbox.checked || Boolean(readinessIssue(post)) || state.tiktok.publishing_ready !== true;
+      publish.disabled = !checkbox.checked || Boolean(publishingIssue(post)) || state.tiktok.publishing_ready !== true;
       scheduleButton.disabled = !checkbox.checked || Boolean(readinessIssue(post));
     });
     actions.append(queue, publish);
@@ -549,15 +555,18 @@ function validateVideoFile(file) {
   if (file.size > 500 * 1024 * 1024) throw new Error("Choose an MP4 video up to 500 MB.");
 }
 
-function uploadMedia(file) {
-  return new Promise((resolve, reject) => {
+async function uploadMedia(file) {
+  const intent = await api("/api/media/upload-intent", {
+    method: "POST",
+    body: { filename: file.name, size: file.size, content_type: "video/mp4" },
+  });
+  if (!intent.upload_url || !intent.upload_token || intent.method !== "PUT" || new URL(intent.upload_url).protocol !== "https:") {
+    throw new Error("The video upload could not be started. Try again.");
+  }
+  await new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
-    request.open("POST", "/api/media");
-    request.responseType = "json";
-    request.withCredentials = true;
-    request.setRequestHeader("Accept", "application/json");
-    request.setRequestHeader("Content-Type", "video/mp4");
-    request.setRequestHeader("X-Filename", encodeURIComponent(file.name));
+    request.open("PUT", intent.upload_url);
+    for (const [name, value] of Object.entries(intent.headers || {})) request.setRequestHeader(name, value);
     request.upload.addEventListener("progress", (event) => {
       if (!event.lengthComputable) return;
       const percent = Math.min(100, Math.round(event.loaded / event.total * 100));
@@ -565,19 +574,14 @@ function uploadMedia(file) {
       $("uploadPercent").textContent = percent + "%";
     });
     request.addEventListener("load", () => {
-      const result = request.response || {};
-      if (request.status < 200 || request.status >= 300) {
-        reject(new Error(result.error || result.message || "The video could not be uploaded."));
-      } else if (!result.id || !safePreviewUrl(result.preview_url)) {
-        reject(new Error("The video upload returned an incomplete result. Try again."));
-      } else {
-        resolve(result);
-      }
+      if (request.status < 200 || request.status >= 300) reject(new Error("The video could not be uploaded to storage. Try again."));
+      else resolve();
     });
     request.addEventListener("error", () => reject(new Error("The video upload failed. Check your connection and try again.")));
     request.addEventListener("abort", () => reject(new Error("The video upload was cancelled.")));
     request.send(file);
   });
+  return api("/api/media/complete", { method: "POST", body: { upload_token: intent.upload_token } });
 }
 
 function lockDraftForm() {
@@ -607,12 +611,12 @@ async function postAction(post, action, approval, localTime, button) {
     const body = {};
     if (["queue", "schedule", "publish"].includes(action)) {
       if (!approval || !approval.checked) throw new Error("Review and approve this post first.");
-      if (!state.tiktok.connected) throw new Error("Connect TikTok before posting.");
+      if (action === "publish" && !state.tiktok.connected) throw new Error("Connect TikTok before publishing.");
       if (action === "publish" && state.tiktok.publishing_ready !== true) {
         throw new Error("Publishing is on hold while video delivery is being configured.");
       }
-      await loadCreatorInfo();
-      const issue = readinessIssue(post);
+      if (action === "publish") await loadCreatorInfo();
+      const issue = action === "publish" ? publishingIssue(post) : readinessIssue(post);
       if (issue) throw new Error(issue);
       body.approved = true;
     }
