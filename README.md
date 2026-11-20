@@ -73,6 +73,6 @@ python3 -m venv .venv
 
 Open `http://127.0.0.1:8000`. Run `.venv/bin/python -m postmanager.worker --loop` separately when TikTok publishing is configured. The app's private video upload limit is 500 MiB.
 
-Only Neon is fully configured so far. Phone sign-in needs `BEEM_AUTHORIZATION` in `key:secret` form and `BEEM_SOURCE_ADDR`. Its default `OTP_DAILY_LIMIT` is 1,000 code sends per rolling 24 hours. TikTok connection needs `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, an HTTPS `APP_BASE_URL`, and the registered `/api/tiktok/callback` redirect. The requested scopes are `user.info.basic`, `video.publish`, and `video.list`. The local HTTP URL is for app development; TikTok OAuth needs HTTPS.
+Phone sign-in needs `BEEM_AUTHORIZATION` in `key:secret` form and `BEEM_SOURCE_ADDR`. Its default `OTP_DAILY_LIMIT` is 1,000 code sends per rolling 24 hours. TikTok connection needs `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, an HTTPS `APP_BASE_URL`, and the registered `/api/tiktok/callback` redirect. The requested scopes are `user.info.basic`, `video.publish`, and `video.list`. The local HTTP URL is for app development; TikTok OAuth needs HTTPS.
 
 The repo's `.codex/config.toml` connects the Neon MCP server, and `AGENTS.md` records the branch-first workflow from the [Neon agent setup guide](https://neon.com/prompts/agent-setup.md).
