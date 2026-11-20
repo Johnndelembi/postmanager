@@ -25,10 +25,10 @@ type UploadClaim = {
 
 export function storageConfigured(): boolean {
   return Boolean(
-    process.env.AWS_ACCESS_KEY_ID &&
-    process.env.AWS_SECRET_ACCESS_KEY &&
-    process.env.AWS_ENDPOINT_URL_S3?.startsWith('https://') &&
-    process.env.AWS_REGION,
+    process.env.NEON_STORAGE_ACCESS_KEY_ID &&
+    process.env.NEON_STORAGE_SECRET_ACCESS_KEY &&
+    process.env.NEON_STORAGE_ENDPOINT?.startsWith('https://') &&
+    process.env.NEON_STORAGE_REGION,
   );
 }
 
@@ -36,11 +36,11 @@ function storage(): S3Client {
   if (!storageConfigured()) throw new ApiError(503, 'Video storage is not configured.');
   if (!storageClient) {
     storageClient = new S3Client({
-      endpoint: process.env.AWS_ENDPOINT_URL_S3,
-      region: process.env.AWS_REGION,
+      endpoint: process.env.NEON_STORAGE_ENDPOINT,
+      region: process.env.NEON_STORAGE_REGION,
       credentials: {
-        accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
-        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+        accessKeyId: process.env.NEON_STORAGE_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.NEON_STORAGE_SECRET_ACCESS_KEY!,
       },
       forcePathStyle: true,
       requestChecksumCalculation: 'WHEN_REQUIRED',
