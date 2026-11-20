@@ -91,6 +91,7 @@ input[type="file"]::file-selector-button { margin-right: 12px; padding: 5px 10px
 .auth-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .auth-panel .message { margin-top: 12px; }
 .auth-footnote { color: var(--muted); font-size: .82rem; margin: 0; }
+.auth-footnote a { margin-left: 5px; }
 
 .app-view { min-height: 100svh; }
 .topbar { min-height: 70px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 14px clamp(18px, 3vw, 42px); border-bottom: 1px solid var(--line); background: var(--paper); }
@@ -188,6 +189,7 @@ input[type="file"]::file-selector-button { margin-right: 12px; padding: 5px 10px
 .analytics-cell span { display: block; color: var(--muted); font-size: .8rem; }
 .analytics-cell strong { display: block; margin-top: 6px; font-size: 1.4rem; font-weight: 720; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
 .analytics-empty { padding: 21px 23px; border: 1px solid var(--line); border-radius: var(--radius); color: var(--muted); background: var(--paper); font-size: .88rem; }
+.workspace-footer { display: flex; flex-wrap: wrap; gap: 12px 20px; margin-top: 50px; padding-top: 24px; border-top: 1px solid var(--line); font-size: .82rem; }
 
 @media (max-width: 1000px) {
   .app-layout { grid-template-columns: 210px minmax(0, 1fr); }

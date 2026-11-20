@@ -85,7 +85,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _static(self, path: str) -> None:
-        files = {"/": ("index.html", "text/html"), "/app.css": ("app.css", "text/css"), "/app.js": ("app.js", "text/javascript")}
+        files = {
+            "/": ("index.html", "text/html"),
+            "/app.css": ("app.css", "text/css"),
+            "/app.js": ("app.js", "text/javascript"),
+            "/legal.css": ("legal.css", "text/css"),
+            "/about/": ("about/index.html", "text/html"),
+            "/privacy/": ("privacy/index.html", "text/html"),
+            "/terms/": ("terms/index.html", "text/html"),
+        }
         if path not in files:
             raise APIError(404, "Page not found.")
         name, content_type = files[path]
@@ -180,7 +188,7 @@ class Handler(BaseHTTPRequestHandler):
         self._redirect(base_url() + "/?tiktok=connected", [("Set-Cookie", _cookie(OAUTH_COOKIE, "", max_age=0))])
 
     def _get(self, path: str, query: dict[str, list[str]]) -> None:
-        if path in ("/", "/app.css", "/app.js"):
+        if path in ("/", "/app.css", "/app.js", "/legal.css", "/about/", "/privacy/", "/terms/"):
             self._static(path)
             return
         if path == "/api/health":
