@@ -4,6 +4,7 @@ import { getPool } from '../lib/db.js';
 import { ApiError, json } from '../lib/http.js';
 import { handleMedia } from '../lib/media.js';
 import { handlePlanner } from '../lib/posts.js';
+import { handleTikTok } from '../lib/tiktok.js';
 
 function normalizeRequest(request: Request): { request: Request; path: string } {
   const url = new URL(request.url);
@@ -23,7 +24,7 @@ function checkOrigin(request: Request): void {
 
 function withRenewedSession(response: Response, userId: number, request: Request): Response {
   const headers = new Headers(response.headers);
-  headers.set('Set-Cookie', renewSessionCookie(userId, request));
+  headers.append('Set-Cookie', renewSessionCookie(userId, request));
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -41,18 +42,7 @@ export default async function handler(incoming: Request, _context: Context): Pro
 
     const user = await getAuthenticatedUser(request);
     let response: Response | null = await handleMedia(request, user.id, path);
-    if (!response && path === '/api/tiktok/status' && request.method === 'GET') {
-      response = json(200, {
-        connected: false,
-        configured: false,
-        publishing_ready: false,
-        audited: false,
-        setup_stage: 'awaiting_https',
-      });
-    }
-    if (!response && path.startsWith('/api/tiktok/')) {
-      throw new ApiError(503, 'TikTok connection will be enabled after the site has a public HTTPS URL.');
-    }
+    if (!response) response = await handleTikTok(request, user.id, path);
     if (!response) response = await handlePlanner(request, user.id);
     return withRenewedSession(response, user.id, request);
   } catch (error) {

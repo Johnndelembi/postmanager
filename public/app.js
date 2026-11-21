@@ -118,19 +118,25 @@ async function loadTikTok() {
     const status = $("tiktokStatus");
     const connect = $("connectTikTok");
     if (state.tiktok.configured === false) {
-      status.textContent = "Plan privately for now. TikTok connection is the next setup step after deployment; planned posts will stay on hold until you review them for publishing.";
+      status.textContent = "Plan privately for now. TikTok connection needs app credentials and a registered callback URL. Planned posts will stay on hold until publishing is ready.";
       connect.hidden = true;
       state.creatorInfo = null;
     } else if (state.tiktok.connected) {
       const name = state.tiktok.username || state.tiktok.nickname;
       status.textContent = name ? "Connected: " + name : "TikTok connected.";
       if (state.tiktok.publishing_ready !== true) {
-        status.textContent += " Publishing is on hold while video delivery is being configured. You can still prepare your queue.";
+        status.textContent += " Publishing is on hold while TikTok review and video delivery are completed. You can still prepare your queue.";
       }
-      connect.hidden = true;
-      await loadCreatorInfo();
+      connect.textContent = "Reconnect TikTok";
+      connect.hidden = false;
+      if (state.tiktok.creator_info_ready) await loadCreatorInfo();
+      else {
+        state.creatorInfo = null;
+        applyCreatorInfo();
+      }
     } else {
-      status.textContent = "Connect TikTok to publish posts and see their performance.";
+      status.textContent = "Connect TikTok to prepare for publishing. Posting and performance analytics need further TikTok setup.";
+      connect.textContent = "Connect TikTok";
       connect.hidden = false;
       state.creatorInfo = null;
     }
