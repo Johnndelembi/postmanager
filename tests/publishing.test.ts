@@ -145,6 +145,38 @@ test("an approved private plan remains on hold without separate TikTok consent",
   });
 });
 
+test("publish now queues consent for the exact TikTok account reviewed in the browser", async () => {
+  await fakePublishing({ post: post({ status: "draft", approved_at: null, approved_tiktok_open_id: null }) }, async (state) => {
+    const response = await handlePlanner(new Request("https://creator.example/api/posts/7/publish", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approved: true, account_open_id: "approved-account" }),
+    }), 42);
+    assert.equal(response.status, 202);
+    assert.equal(state.post.status, "queued");
+    assert.ok(state.post.approved_at instanceof Date);
+    assert.equal(state.post.approved_tiktok_open_id, "approved-account");
+    assert.ok(new Date(String(state.post.scheduled_at)).getTime() <= Date.now());
+    assert.equal(state.inits.length, 0);
+  });
+});
+
+test("publishing approval rejects an account switched since browser review", async () => {
+  for (const action of ["publish", "approve"]) {
+    await fakePublishing({
+      accountId: "different-account",
+      post: post({ status: action === "publish" ? "draft" : "scheduled", approved_at: null, approved_tiktok_open_id: null, scheduled_at: new Date(Date.now() + 3600_000) }),
+    }, async (state) => {
+      await assert.rejects(() => handlePlanner(new Request(`https://creator.example/api/posts/7/${action}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved: true, account_open_id: "approved-account" }),
+      }), 42), (error: unknown) => error instanceof ApiError && error.status === 409);
+      assert.equal(state.post.approved_at, null);
+      assert.equal(state.post.approved_tiktok_open_id, null);
+      assert.equal(state.inits.length, 0);
+    });
+  }
+});
+
 test("the worker durably claims a post before one PULL_FROM_URL request", async () => {
   await fakePublishing({}, async (state) => {
     const first = await runPublishingTick({ maxStatusChecks: 0 });

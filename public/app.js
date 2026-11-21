@@ -414,6 +414,7 @@ function reviewConsent(post, publish = false) {
   label.append(checkbox, copy);
   function setPublishing(value) {
     checkbox.checked = false;
+    checkbox.dataset.tiktokAccountId = value ? state.creatorInfo?.account_open_id || '' : '';
     copy.replaceChildren();
     copy.append("I reviewed this video, caption, and settings" + (value ? " for " + creatorName() + ". " : ". This stays a private plan until I approve TikTok publishing."));
     if (value) {
@@ -776,10 +777,16 @@ async function postAction(post, action, approval, localTime, button, publishToTi
     if (["queue", "schedule", "publish", "approve"].includes(action)) {
       if (!approval || !approval.checked) throw new Error("Review and approve this post first.");
       const publishing = publishToTikTok || ["publish", "approve"].includes(action);
+      const reviewedAccount = approval.dataset.tiktokAccountId;
       if (publishing && !(await loadCreatorInfo())) throw new Error("TikTok posting settings could not be refreshed. Try again before approving.");
+      if (publishing && (!reviewedAccount || reviewedAccount !== state.creatorInfo?.account_open_id)) {
+        renderPosts();
+        throw new Error('The TikTok account changed. Review this post again for the connected account.');
+      }
       const issue = publishing ? publishingIssue(post) : readinessIssue(post);
       if (issue) throw new Error(issue);
       body.approved = true;
+      if (publishing) body.account_open_id = reviewedAccount;
       if (["queue", "schedule"].includes(action)) body.publish_to_tiktok = publishToTikTok;
     }
     if (action === "schedule") {

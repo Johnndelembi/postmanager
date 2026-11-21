@@ -463,5 +463,7 @@ export async function handleTikTok(request: Request, userId: number, pathname: s
   }
 
   if (!configured(request)) throw new ApiError(503, "TikTok Login Kit is not configured.");
-  return json(200, await creatorInfo(userId));
+  const account = await getTikTokAccount(userId);
+  if (!account.open_id) throw new ApiError(409, 'Connect a TikTok account first.');
+  return json(200, { ...await creatorInfo(userId, account.open_id), account_open_id: account.open_id });
 }

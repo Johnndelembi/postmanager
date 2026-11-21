@@ -223,6 +223,9 @@ async function planPost(userId: number, postId: string, action: "queue" | "sched
   if ("publish_to_tiktok" in data && typeof data.publish_to_tiktok !== "boolean") throw new ApiError(400, "Choose whether this plan should publish to TikTok.");
   const sendToTikTok = action === "publish" || data.publish_to_tiktok === true;
   const approval = sendToTikTok ? await publishingApproval(userId) : null;
+  if (approval && data.account_open_id !== approval.openId) {
+    throw new ApiError(409, 'The TikTok account changed. Refresh and review this post again.');
+  }
   try {
     const post = await transaction(async (db) => {
       await db.query("SELECT id FROM users WHERE id = $1 FOR UPDATE", [userId]);
@@ -275,6 +278,9 @@ async function planPost(userId: number, postId: string, action: "queue" | "sched
 async function approvePlannedPost(userId: number, postId: string, data: Record<string, unknown>): Promise<Response> {
   if (data.approved !== true) throw new ApiError(400, "Review the post and approve TikTok publishing first.");
   const approval = await publishingApproval(userId);
+  if (data.account_open_id !== approval.openId) {
+    throw new ApiError(409, 'The TikTok account changed. Refresh and review this post again.');
+  }
   const post = await transaction(async (db) => {
     const current = await ownedPost(db, userId, postId);
     if (!["queued", "scheduled"].includes(current.status)) throw new ApiError(409, "Only a queued or scheduled private plan can be approved here.");
