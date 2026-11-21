@@ -27,7 +27,7 @@ export function storageConfigured(): boolean {
   return Boolean(
     process.env.NEON_STORAGE_ACCESS_KEY_ID &&
     process.env.NEON_STORAGE_SECRET_ACCESS_KEY &&
-    process.env.NEON_STORAGE_ENDPOINT?.startsWith('https://') &&
+    process.env.NEON_STORAGE_ENDPOINT_URL_S3?.startsWith('https://') &&
     process.env.NEON_STORAGE_REGION,
   );
 }
@@ -36,7 +36,7 @@ function storage(): S3Client {
   if (!storageConfigured()) throw new ApiError(503, 'Video storage is not configured.');
   if (!storageClient) {
     storageClient = new S3Client({
-      endpoint: process.env.NEON_STORAGE_ENDPOINT,
+      endpoint: process.env.NEON_STORAGE_ENDPOINT_URL_S3,
       region: process.env.NEON_STORAGE_REGION,
       credentials: {
         accessKeyId: process.env.NEON_STORAGE_ACCESS_KEY_ID!,
