@@ -62,6 +62,7 @@
             <h2 id="tiktokHeading">TikTok account</h2>
             <p id="tiktokStatus" class="side-copy" role="status" aria-live="polite">Checking connection…</p>
             <a id="connectTikTok" class="button button-secondary" href="/api/tiktok/connect" hidden>Connect TikTok</a>
+            <button id="refreshTikTok" class="button button-quiet button-small" type="button">Refresh connection</button>
           </section>
           <section class="side-section" aria-labelledby="queueHeading">
             <div class="section-heading">
@@ -98,6 +99,7 @@
               </div>
               <button id="cancelEdit" type="button" class="button button-quiet button-small" hidden>Cancel edit</button>
             </div>
+            <p id="postingAccount" class="posting-account" role="status" aria-live="polite">Connect TikTok to choose a publishing account.</p>
             <form id="draftForm">
               <div class="composer-grid">
                 <div class="form-stack">
@@ -129,7 +131,7 @@
                     <select id="privacyLevel" name="privacy_level">
                       <option value="">Choose after connecting TikTok</option>
                     </select>
-                    <p class="field-help">Choose privacy after connecting TikTok. You can plan your queue now.</p>
+                    <p id="privacyHelp" class="field-help">Choose privacy after connecting TikTok. You can plan your queue now.</p>
                   </div>
                   <fieldset class="post-settings">
                     <legend>Post settings</legend>
@@ -144,6 +146,7 @@
                     <div id="commercialOptions" class="commercial-options" hidden>
                       <label class="check-row"><input id="brandOrganic" name="brand_organic_toggle" type="checkbox"><span>My own brand</span></label>
                       <label class="check-row"><input id="brandContent" name="brand_content_toggle" type="checkbox"><span>Paid partnership or another brand</span></label>
+                      <p id="commercialLabel" class="field-help" role="status" aria-live="polite"></p>
                     </div>
                   </fieldset>
                 </div>
@@ -186,10 +189,14 @@
 
           <section class="analytics" aria-labelledby="analyticsHeading">
             <div class="analytics-header">
-              <h2 id="analyticsHeading">Performance</h2>
-              <p>Public post counts from TikTok.</p>
+              <div>
+                <h2 id="analyticsHeading">Performance</h2>
+                <p>Views, likes, comments, and shares for public posts sent with Postmanager.</p>
+              </div>
+              <button id="refreshAnalytics" type="button" class="button button-secondary button-small">Sync TikTok metrics</button>
             </div>
-            <div id="analyticsContent"></div>
+            <p id="analyticsMessage" class="message" role="status" aria-live="polite"></p>
+            <div id="analyticsContent" aria-live="polite"></div>
           </section>
           <footer class="workspace-footer"><a href="/about/">About</a><a href="/privacy/">Privacy Policy</a><a href="/terms/">Terms of Service</a></footer>
         </div>

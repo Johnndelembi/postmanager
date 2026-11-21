@@ -2,6 +2,7 @@ import type { PoolClient } from "pg";
 
 import { getPool } from "./db.js";
 import { ApiError, json } from "./http.js";
+import { checkApprovalAccount, publishingApproval, refreshPostStatus, validatePostForPublishing, type PublishingPost } from "./publishing.js";
 
 const TIMEZONE = "Africa/Dar_es_Salaam";
 const DEFAULT_QUEUE_TIMES = ["09:00", "18:00"];
@@ -12,13 +13,7 @@ const PRIVACY_LEVELS = new Set(["PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "
 const BOOLEAN_FIELDS = ["allow_comment", "allow_duet", "allow_stitch", "is_aigc", "brand_organic_toggle", "brand_content_toggle"] as const;
 const POST_FIELDS = ["title", "caption", "media_asset_id", "duration_seconds", "privacy_level", ...BOOLEAN_FIELDS] as const;
 
-type PostRow = {
-  [column: string]: unknown;
-  id: string;
-  media_asset_id: string | null;
-  duration_seconds: number | null;
-  status: string;
-};
+type PostRow = PublishingPost;
 
 function publicPost(post: PostRow) {
   return { ...post, preview_url: post.media_asset_id ? `/api/media/${post.media_asset_id}/preview` : null };
@@ -183,7 +178,10 @@ async function updatePost(userId: number, postId: string, data: Record<string, u
     if ("media_asset_id" in values) await checkMediaOwner(db, userId, values.media_asset_id);
     const assignments = fields.map((field, index) => `${field} = $${index + 1}`).join(", ");
     const result = await db.query<PostRow>(
-      `UPDATE posts SET ${assignments}, updated_at = now(), last_error = NULL WHERE id = $${fields.length + 1} RETURNING *`,
+      `UPDATE posts SET ${assignments}, updated_at = now(), last_error = NULL,
+       approved_at = NULL, approved_tiktok_open_id = NULL, tiktok_publish_id = NULL,
+       tiktok_post_id = NULL, publish_started_at = NULL, last_status_checked_at = NULL
+       WHERE id = $${fields.length + 1} RETURNING *`,
       [...fields.map((field) => values[field]), postId],
     );
     return result.rows[0];
@@ -210,6 +208,8 @@ async function draftPost(userId: number, postId: string): Promise<Response> {
     }
     const result = await db.query<PostRow>(
       `UPDATE posts SET status = 'draft', scheduled_at = NULL, approved_at = NULL,
+       approved_tiktok_open_id = NULL, tiktok_publish_id = NULL, tiktok_post_id = NULL,
+       publish_started_at = NULL, last_status_checked_at = NULL,
        last_error = NULL, updated_at = now() WHERE id = $1 RETURNING *`,
       [postId],
     );
@@ -218,8 +218,11 @@ async function draftPost(userId: number, postId: string): Promise<Response> {
   return json(200, publicPost(post));
 }
 
-async function planPost(userId: number, postId: string, action: "queue" | "schedule", data: Record<string, unknown>): Promise<Response> {
+async function planPost(userId: number, postId: string, action: "queue" | "schedule" | "publish", data: Record<string, unknown>): Promise<Response> {
   if (data.approved !== true) throw new ApiError(400, "Review the post before adding it to your plan.");
+  if ("publish_to_tiktok" in data && typeof data.publish_to_tiktok !== "boolean") throw new ApiError(400, "Choose whether this plan should publish to TikTok.");
+  const sendToTikTok = action === "publish" || data.publish_to_tiktok === true;
+  const approval = sendToTikTok ? await publishingApproval(userId) : null;
   try {
     const post = await transaction(async (db) => {
       await db.query("SELECT id FROM users WHERE id = $1 FOR UPDATE", [userId]);
@@ -230,6 +233,10 @@ async function planPost(userId: number, postId: string, action: "queue" | "sched
       if (!current.media_asset_id || !current.duration_seconds) {
         throw new ApiError(400, "Upload a video and confirm its duration before scheduling.");
       }
+      if (approval) {
+        validatePostForPublishing(current, approval.creator);
+        await checkApprovalAccount(db, userId, approval.openId);
+      }
       const now = new Date();
       let when: Date;
       if (action === "queue") {
@@ -239,28 +246,50 @@ async function planPost(userId: number, postId: string, action: "queue" | "sched
           [userId, now],
         );
         when = nextQueueTime(now, settings.rows[0]?.queue_times ?? DEFAULT_QUEUE_TIMES, reserved.rows.map((row) => row.scheduled_at));
-      } else {
+      } else if (action === "schedule") {
         when = scheduledTime(data.scheduled_at, now);
         const taken = await db.query(
           "SELECT 1 FROM posts WHERE user_id = $1 AND status IN ('queued', 'scheduled') AND scheduled_at = $2 LIMIT 1",
           [userId, when],
         );
         if (taken.rowCount) throw new ApiError(409, "Another post already uses that time.");
-      }
-      // Planning is provisional; only a later TikTok review may set approved_at for the worker.
+      } else when = now;
       const result = await db.query<PostRow>(
-        "UPDATE posts SET status = $1, scheduled_at = $2, approved_at = NULL, last_error = NULL, updated_at = now() WHERE id = $3 RETURNING *",
-        [action === "queue" ? "queued" : "scheduled", when, postId],
+        `UPDATE posts SET status = $1, scheduled_at = $2, approved_at = $3,
+         approved_tiktok_open_id = $4, tiktok_publish_id = NULL, tiktok_post_id = NULL,
+         publish_started_at = NULL, last_status_checked_at = NULL, last_error = NULL,
+         updated_at = now() WHERE id = $5 RETURNING *`,
+        [action === "schedule" ? "scheduled" : "queued", when, approval ? now : null, approval?.openId ?? null, postId],
       );
       return result.rows[0];
     });
-    return json(200, publicPost(post));
+    return json(action === "publish" ? 202 : 200, publicPost(post));
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "23505") {
       throw new ApiError(409, "Another post already uses that time.");
     }
     throw error;
   }
+}
+
+async function approvePlannedPost(userId: number, postId: string, data: Record<string, unknown>): Promise<Response> {
+  if (data.approved !== true) throw new ApiError(400, "Review the post and approve TikTok publishing first.");
+  const approval = await publishingApproval(userId);
+  const post = await transaction(async (db) => {
+    const current = await ownedPost(db, userId, postId);
+    if (!["queued", "scheduled"].includes(current.status)) throw new ApiError(409, "Only a queued or scheduled private plan can be approved here.");
+    if (!current.scheduled_at || new Date(String(current.scheduled_at)).getTime() <= Date.now()) {
+      throw new ApiError(409, "The planned time has passed. Move this post to drafts and choose a future time.");
+    }
+    validatePostForPublishing(current, approval.creator);
+    await checkApprovalAccount(db, userId, approval.openId);
+    const result = await db.query<PostRow>(
+      "UPDATE posts SET approved_at = now(), approved_tiktok_open_id = $1, last_error = NULL, updated_at = now() WHERE id = $2 RETURNING *",
+      [approval.openId, postId],
+    );
+    return result.rows[0];
+  });
+  return json(200, publicPost(post));
 }
 
 async function getSettings(userId: number): Promise<Response> {
@@ -295,7 +324,7 @@ export async function handlePlanner(request: Request, userId: number): Promise<R
     if (method === "PUT") return putSettings(userId, await payload(request));
     throw new ApiError(405, "Method not allowed.");
   }
-  const match = /^\/api\/posts\/([1-9]\d*)(?:\/(queue|schedule|draft|publish))?$/.exec(path);
+  const match = /^\/api\/posts\/([1-9]\d*)(?:\/(queue|schedule|draft|publish|approve|status))?$/.exec(path);
   if (!match) throw new ApiError(404, "Route not found.");
   const [, postId, action] = match;
   if (!action) {
@@ -305,6 +334,7 @@ export async function handlePlanner(request: Request, userId: number): Promise<R
   }
   if (method !== "POST") throw new ApiError(405, "Method not allowed.");
   if (action === "draft") return draftPost(userId, postId);
-  if (action === "publish") throw new ApiError(503, "Direct publishing needs TikTok setup and a verified media URL prefix.");
-  return planPost(userId, postId, action as "queue" | "schedule", await payload(request));
+  if (action === "status") return json(200, publicPost(await refreshPostStatus(userId, postId)));
+  if (action === "approve") return approvePlannedPost(userId, postId, await payload(request));
+  return planPost(userId, postId, action as "queue" | "schedule" | "publish", await payload(request));
 }

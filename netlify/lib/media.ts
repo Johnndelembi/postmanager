@@ -49,6 +49,13 @@ function storage(): S3Client {
   return storageClient;
 }
 
+export async function signedStorageVideoUrl(key: string, expiresIn = 2 * 60 * 60): Promise<string> {
+  if (!/^users\/[1-9][0-9]*\/[a-f0-9]{32}\.mp4$/.test(key)) {
+    throw new ApiError(400, 'The stored video is invalid.');
+  }
+  return getSignedUrl(storage(), new GetObjectCommand({ Bucket: BUCKET, Key: key }), { expiresIn });
+}
+
 function signingKey(): string {
   const key = process.env.SESSION_SECRET;
   if (!key || key.length < 32) throw new ApiError(503, 'Upload signing is not configured.');

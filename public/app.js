@@ -15,8 +15,12 @@ const state = {
   phone: "",
   tiktok: { connected: false, configured: true },
   creatorInfo: null,
+  analytics: null,
+  analyticsError: "",
   settings: { timezone: "Africa/Dar_es_Salaam", queue_times: [] },
 };
+let plannerPoll;
+let plannerLoading = false;
 
 const privacyNames = {
   PUBLIC_TO_EVERYONE: "Everyone",
@@ -105,7 +109,7 @@ async function start() {
     const user = await api("/api/me");
     $("accountPhone").textContent = user.phone || "";
     show("app");
-    await Promise.allSettled([loadTikTok(), loadMediaStatus(), loadSettings(), loadPosts()]);
+    await Promise.allSettled([loadTikTok(), loadMediaStatus(), loadSettings(), loadPosts(), loadAnalytics()]);
   } catch (error) {
     show("auth");
     if (error.status !== 401) message("authMessage", error.message, "error");
@@ -125,7 +129,11 @@ async function loadTikTok() {
       const name = state.tiktok.username || state.tiktok.nickname;
       status.textContent = name ? "Connected: " + name : "TikTok connected.";
       if (state.tiktok.publishing_ready !== true) {
-        status.textContent += " Publishing is on hold while TikTok review and video delivery are completed. You can still prepare your queue.";
+        status.textContent += state.tiktok.reconnect_required
+          ? " Reconnect to grant publishing and analytics access after TikTok approves those permissions."
+          : " Publishing is on hold until TikTok permissions and video delivery are ready. Private planning is available.";
+      } else if (state.tiktok.audited !== true) {
+        status.textContent += " Until TikTok's audit is complete, posting uses Only me and your TikTok account must be private.";
       }
       connect.textContent = "Reconnect TikTok";
       connect.hidden = false;
@@ -135,16 +143,19 @@ async function loadTikTok() {
         applyCreatorInfo();
       }
     } else {
-      status.textContent = "Connect TikTok to prepare for publishing. Posting and performance analytics need further TikTok setup.";
+      status.textContent = "Connect TikTok to publish approved videos and sync public post performance.";
       connect.textContent = "Connect TikTok";
       connect.hidden = false;
       state.creatorInfo = null;
     }
     renderPosts();
+    renderAnalytics();
+    applyCreatorInfo();
   } catch (error) {
     $("tiktokStatus").textContent = "TikTok status is unavailable. " + error.message;
     $("connectTikTok").hidden = false;
     state.creatorInfo = null;
+    applyCreatorInfo();
   }
 }
 
@@ -177,10 +188,12 @@ async function loadCreatorInfo() {
     const result = await api("/api/tiktok/creator-info");
     state.creatorInfo = result.data || result;
     applyCreatorInfo();
+    return true;
   } catch (error) {
     state.creatorInfo = null;
     $("tiktokStatus").textContent += " Posting settings are unavailable: " + error.message;
     applyCreatorInfo();
+    return false;
   }
 }
 
@@ -210,9 +223,20 @@ function applyCreatorInfo() {
     if (input.disabled) input.checked = false;
   }
   const max = Number(state.creatorInfo && state.creatorInfo.max_video_post_duration_sec);
+  $("postingAccount").textContent = state.tiktok.connected
+    ? "Publishing account: " + creatorName()
+    : "Connect TikTok to choose a publishing account.";
+  $("privacyHelp").textContent = state.tiktok.connected && state.tiktok.audited !== true
+    ? "Choose a TikTok privacy setting. Until the app passes audit, publishing requires Only me and a private TikTok account."
+    : "Select who can watch before approving publishing. Private plans do not need a TikTok privacy setting yet.";
   $("durationHelp").textContent = Number.isFinite(max) && max > 0
     ? "Your TikTok account allows videos up to " + numberFormat.format(max) + " seconds. We will fill this from the preview when available."
     : "We will fill this from the video when available. You can enter it yourself.";
+  updateCommercialLabel();
+}
+
+function creatorName() {
+  return state.creatorInfo?.creator_nickname || state.tiktok.username || state.tiktok.nickname || "your connected TikTok account";
 }
 
 async function loadSettings() {
@@ -247,18 +271,60 @@ function renderQueueTimes() {
 }
 
 async function loadPosts() {
+  if (plannerLoading) return;
+  plannerLoading = true;
   try {
     const result = await api("/api/posts");
-    state.posts = Array.isArray(result.posts) ? result.posts : [];
+    const posts = Array.isArray(result.posts) ? result.posts : [];
+    const changed = JSON.stringify(posts) !== JSON.stringify(state.posts) || Boolean(state.postsError);
+    state.posts = posts;
     state.postsError = "";
-    message("workspaceMessage");
-    renderPosts();
-    renderAnalytics();
+    if (changed) renderPosts();
+    schedulePlannerPoll();
   } catch (error) {
     state.posts = null;
     state.postsError = error.message;
     message("workspaceMessage", error.message, "error");
     renderPosts();
+  } finally {
+    plannerLoading = false;
+  }
+}
+
+function schedulePlannerPoll() {
+  clearTimeout(plannerPoll);
+  const pending = state.posts?.some((post) => post.status === "publishing" ||
+    (["queued", "scheduled"].includes(post.status) && post.approved_at));
+  if (pending && !$("appView").hidden) {
+    plannerPoll = setTimeout(async () => {
+      if (!document.hidden) await loadPosts();
+      else schedulePlannerPoll();
+    }, 20_000);
+  }
+}
+
+async function loadAnalytics(sync = false) {
+  const button = $("refreshAnalytics");
+  if (sync) {
+    button.disabled = true;
+    button.textContent = "Syncing…";
+    message("analyticsMessage", "Checking public post metrics with TikTok…");
+  }
+  try {
+    state.analytics = await api(sync ? "/api/analytics/refresh" : "/api/analytics", sync ? { method: "POST", body: {} } : {});
+    state.analyticsError = "";
+    if (sync) {
+      const refresh = state.analytics.refresh || {};
+      message("analyticsMessage", refresh.cooldown
+        ? "Metrics were checked recently. Try again in " + refresh.retry_after + " seconds."
+        : "Metrics updated for " + (refresh.updated || 0) + " public " + (refresh.updated === 1 ? "post" : "posts") + ".", "success");
+      await loadPosts();
+    }
+  } catch (error) {
+    state.analyticsError = error.message;
+    if (sync) message("analyticsMessage", error.message, "error");
+  } finally {
+    button.textContent = "Sync TikTok metrics";
     renderAnalytics();
   }
 }
@@ -313,6 +379,7 @@ function publishingIssue(post) {
   const issue = readinessIssue(post);
   if (issue) return issue;
   if (!state.tiktok.connected) return "Connect TikTok before publishing.";
+  if (state.tiktok.publishing_ready !== true) return "Publishing needs approved TikTok permissions and configured video delivery. You can save a private plan.";
   if (!state.creatorInfo) return "TikTok posting settings are unavailable. Refresh the page and try again.";
   const duration = Number(post.duration_seconds);
   const max = Number(state.creatorInfo.max_video_post_duration_sec);
@@ -331,6 +398,36 @@ function publishingIssue(post) {
   return "";
 }
 
+function policyLink(text, url) {
+  const link = make("a", "", text);
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  return link;
+}
+
+function reviewConsent(post, publish = false) {
+  const label = make("label", "post-approval");
+  const checkbox = make("input");
+  checkbox.type = "checkbox";
+  const copy = make("span");
+  label.append(checkbox, copy);
+  function setPublishing(value) {
+    checkbox.checked = false;
+    copy.replaceChildren();
+    copy.append("I reviewed this video, caption, and settings" + (value ? " for " + creatorName() + ". " : ". This stays a private plan until I approve TikTok publishing."));
+    if (value) {
+      copy.append("By posting, you agree to TikTok's ");
+      if (post.brand_content_toggle) {
+        copy.append(policyLink("Branded Content Policy", "https://www.tiktok.com/legal/page/global/bc-policy/en"), " and ");
+      }
+      copy.append(policyLink("Music Usage Confirmation", "https://www.tiktok.com/legal/page/global/music-usage-confirmation/en"), ".");
+    }
+  }
+  setPublishing(publish);
+  return { label, checkbox, setPublishing };
+}
+
 function postRow(post) {
   const row = make("article", "post-row");
   row.setAttribute("aria-label", post.title || "Untitled draft");
@@ -347,6 +444,10 @@ function postRow(post) {
   row.append(top);
   if (["queued", "scheduled"].includes(post.status) && !post.approved_at) {
     row.append(make("p", "field-help", "Planned privately. It will stay on hold until TikTok is connected and you approve publishing."));
+  } else if (["queued", "scheduled"].includes(post.status) && post.approved_at) {
+    row.append(make("p", "field-help", "Approved for automatic TikTok publishing when due. Move to drafts to cancel before processing starts."));
+  } else if (post.status === "publishing") {
+    row.append(make("p", "field-help", "TikTok is processing this post. It can take a few minutes to appear on your profile. Do not submit the same video again while its result is pending."));
   }
   if (post.caption) row.append(make("p", "post-caption", post.caption));
 
@@ -359,6 +460,11 @@ function postRow(post) {
   if (post.brand_organic_toggle) settings.append(make("span", "", "Own brand"));
   if (post.brand_content_toggle) settings.append(make("span", "", "Branded content"));
   row.append(settings);
+  if (post.brand_content_toggle || post.brand_organic_toggle) {
+    row.append(make("p", "field-help", post.brand_content_toggle
+      ? "This video will be labeled as Paid partnership."
+      : "This video will be labeled as Promotional content."));
+  }
 
   const previewUrl = safePreviewUrl(post.preview_url);
   if (previewUrl) {
@@ -388,30 +494,32 @@ function postRow(post) {
       metrics.append(item);
     }
     row.append(metrics);
+    if (post.analytics_synced_at) row.append(make("p", "field-help", "Metrics synced " + formattedDate(post.analytics_synced_at)));
+    if (post.analytics_error) row.append(make("p", "post-error", post.analytics_error));
   }
 
   const id = String(post.id);
   if (post.status === "draft" || post.status === "failed") {
     const actions = make("div", "post-actions");
     actions.append(actionButton("Edit", "button-quiet", () => editPost(post)));
-    const approval = make("label", "post-approval");
-    const checkbox = make("input");
-    checkbox.type = "checkbox";
-    approval.append(checkbox, make("span", "", "I reviewed the video and caption for " + (post.title || "this draft") + ". I understand this is a private plan until I separately approve TikTok publishing."));
-    row.append(approval);
+    const sendLabel = make("label", "post-approval publish-choice");
+    const send = make("input");
+    send.type = "checkbox";
+    send.disabled = Boolean(publishingIssue(post));
+    sendLabel.append(send, make("span", "", "Send to " + creatorName() + " now or automatically at the queue or scheduled time."));
+    row.append(sendLabel);
+    const approval = reviewConsent(post);
+    const checkbox = approval.checkbox;
+    row.append(approval.label);
     const issue = readinessIssue(post);
     if (issue) row.append(make("p", "field-help", issue));
-    if (!state.tiktok.connected) row.append(make("p", "field-help", "Queue and schedule now; publishing will require a later TikTok review."));
-    const queue = actionButton("Add to queue", "button-secondary", () => postAction(post, "queue", checkbox));
+    const sendIssue = publishingIssue(post);
+    if (sendIssue && sendIssue !== issue) row.append(make("p", "field-help", sendIssue));
+    const queue = actionButton("Add to private queue", "button-secondary", () => postAction(post, "queue", checkbox, undefined, undefined, send.checked));
     const publish = actionButton("Publish now", "button-primary", () => postAction(post, "publish", checkbox));
-    publish.hidden = !state.tiktok.connected;
+    publish.hidden = !state.tiktok.publishing_ready;
     queue.disabled = true;
     publish.disabled = true;
-    checkbox.addEventListener("change", () => {
-      queue.disabled = !checkbox.checked || Boolean(readinessIssue(post));
-      publish.disabled = !checkbox.checked || Boolean(publishingIssue(post)) || state.tiktok.publishing_ready !== true;
-      scheduleButton.disabled = !checkbox.checked || Boolean(readinessIssue(post));
-    });
     actions.append(queue, publish);
     row.append(actions);
     const schedule = make("form", "schedule-form");
@@ -424,20 +532,55 @@ function postRow(post) {
     input.setAttribute("aria-describedby", "schedule-zone-" + id);
     const zone = make("span", "timezone", "EAT");
     zone.id = "schedule-zone-" + id;
-    const scheduleButton = make("button", "button button-secondary button-small", "Schedule");
+    const scheduleButton = make("button", "button button-secondary button-small", "Save private schedule");
     scheduleButton.type = "submit";
     scheduleButton.disabled = true;
     schedule.append(label, input, zone, scheduleButton);
     schedule.addEventListener("submit", (event) => {
       event.preventDefault();
-      postAction(post, "schedule", checkbox, input.value, scheduleButton);
+      postAction(post, "schedule", checkbox, input.value, scheduleButton, send.checked);
+    });
+    const updateActions = () => {
+      const blocked = !checkbox.checked || Boolean(send.checked ? publishingIssue(post) : readinessIssue(post));
+      queue.disabled = blocked;
+      publish.disabled = blocked || !send.checked;
+      scheduleButton.disabled = blocked;
+      queue.textContent = send.checked ? "Queue for TikTok" : "Add to private queue";
+      scheduleButton.textContent = send.checked ? "Schedule for TikTok" : "Save private schedule";
+    };
+    checkbox.addEventListener("change", updateActions);
+    send.addEventListener("change", async () => {
+      approval.setPublishing(send.checked);
+      updateActions();
+      checkbox.disabled = true;
+      send.disabled = true;
+      if (send.checked && !(await loadCreatorInfo())) send.checked = false;
+      approval.setPublishing(send.checked);
+      checkbox.disabled = false;
+      send.disabled = Boolean(publishingIssue(post));
+      updateActions();
     });
     row.append(schedule);
     row.append(actionButton("Delete draft", "button-danger button-small", () => deletePost(id)));
   } else if (post.status === "queued" || post.status === "scheduled") {
     const actions = make("div", "post-actions");
+    if (!post.approved_at && state.tiktok.publishing_ready) {
+      const approval = reviewConsent(post, true);
+      const approve = actionButton("Approve TikTok publishing", "button-secondary button-small", () => postAction(post, "approve", approval.checkbox));
+      const timePassed = !post.scheduled_at || new Date(post.scheduled_at).getTime() <= Date.now();
+      approve.disabled = true;
+      approval.checkbox.disabled = timePassed;
+      approval.checkbox.addEventListener("change", () => { approve.disabled = timePassed || !approval.checkbox.checked || Boolean(publishingIssue(post)); });
+      row.append(approval.label);
+      const issue = publishingIssue(post);
+      if (timePassed) row.append(make("p", "field-help", "The planned time has passed. Move to drafts and choose a future time before approving TikTok publishing."));
+      else if (issue) row.append(make("p", "field-help", issue + " Move to drafts to edit."));
+      actions.append(approve);
+    }
     actions.append(actionButton("Move to drafts", "button-quiet button-small", () => postAction(post, "draft")));
     row.append(actions);
+  } else if (post.status === "publishing") {
+    row.append(actionButton("Check TikTok status", "button-secondary button-small", () => postAction(post, "status")));
   }
   return row;
 }
@@ -456,7 +599,8 @@ function actionButton(label, style, action) {
   return button;
 }
 
-function editPost(post) {
+async function editPost(post) {
+  if (state.tiktok.creator_info_ready) await loadCreatorInfo();
   state.editingId = post.id;
   state.editingPreviewUrl = safePreviewUrl(post.preview_url);
   state.editingDuration = post.duration_seconds || null;
@@ -609,22 +753,34 @@ function renderCommercialOptions() {
     $("brandOrganic").checked = false;
     $("brandContent").checked = false;
   }
+  updateCommercialLabel();
 }
 
-async function postAction(post, action, approval, localTime, button) {
+function updateCommercialLabel() {
+  const branded = $("commercialDisclosure").checked && $("brandContent").checked;
+  const organic = $("commercialDisclosure").checked && $("brandOrganic").checked;
+  $("commercialLabel").textContent = branded
+    ? "Your video will be labeled as Paid partnership. Branded content cannot use Only me privacy."
+    : organic ? "Your video will be labeled as Promotional content."
+      : "Choose your own brand, another brand, or both before publishing.";
+  for (const option of $("privacyLevel").options) {
+    if (option.value === "SELF_ONLY") option.disabled = branded;
+  }
+  if (branded && $("privacyLevel").value === "SELF_ONLY") $("privacyLevel").value = "";
+}
+
+async function postAction(post, action, approval, localTime, button, publishToTikTok = false) {
   try {
     const id = encodeURIComponent(String(post.id));
     const body = {};
-    if (["queue", "schedule", "publish"].includes(action)) {
+    if (["queue", "schedule", "publish", "approve"].includes(action)) {
       if (!approval || !approval.checked) throw new Error("Review and approve this post first.");
-      if (action === "publish" && !state.tiktok.connected) throw new Error("Connect TikTok before publishing.");
-      if (action === "publish" && state.tiktok.publishing_ready !== true) {
-        throw new Error("Publishing is on hold while video delivery is being configured.");
-      }
-      if (action === "publish") await loadCreatorInfo();
-      const issue = action === "publish" ? publishingIssue(post) : readinessIssue(post);
+      const publishing = publishToTikTok || ["publish", "approve"].includes(action);
+      if (publishing && !(await loadCreatorInfo())) throw new Error("TikTok posting settings could not be refreshed. Try again before approving.");
+      const issue = publishing ? publishingIssue(post) : readinessIssue(post);
       if (issue) throw new Error(issue);
       body.approved = true;
+      if (["queue", "schedule"].includes(action)) body.publish_to_tiktok = publishToTikTok;
     }
     if (action === "schedule") {
       if (!localTime) throw new Error("Choose a date and time in East Africa Time.");
@@ -638,7 +794,15 @@ async function postAction(post, action, approval, localTime, button) {
     if (action === "publish" && result.status === "failed") {
       message("workspaceMessage", result.last_error || "TikTok could not publish this post. Review the draft and try again.", "error");
     } else {
-      message("workspaceMessage", action === "draft" ? "Post moved to drafts." : action === "publish" ? "Publish request sent. Check this post for its latest status." : "Post added to your plan.", "success");
+      const notices = {
+        draft: "Post moved to drafts. Any automatic publishing approval was cancelled.",
+        publish: "Post approved. Publishing will start shortly; TikTok may take a few minutes to process it.",
+        approve: "This planned post is approved for automatic TikTok publishing when due.",
+        status: "TikTok status refreshed.",
+      };
+      message("workspaceMessage", notices[action] || (publishToTikTok
+        ? "Post approved for automatic TikTok publishing at its planned time."
+        : "Private plan saved. It will stay on hold until you approve TikTok publishing."), "success");
     }
   } catch (error) {
     message("workspaceMessage", error.message, "error");
@@ -661,31 +825,81 @@ async function deletePost(id) {
 function renderAnalytics() {
   const host = $("analyticsContent");
   host.replaceChildren();
-  if (!state.posts) {
-    host.append(make("p", "analytics-empty", state.postsError
-      ? "Performance is unavailable until your posts load."
-      : "Loading performance…"));
+  const data = state.analytics;
+  $("refreshAnalytics").disabled = !data?.available;
+  if (state.analyticsError) host.append(make("p", "analytics-empty", "Metrics could not be loaded: " + state.analyticsError + " Use Refresh connection, then try syncing again."));
+  if (!data) {
+    if (!state.analyticsError) host.append(make("p", "analytics-empty", "Loading performance…"));
     return;
   }
-  const published = state.posts.filter((post) => post.status === "published");
-  const available = published.filter((post) => ["view_count", "like_count", "comment_count", "share_count"].some((key) => post[key] !== null && post[key] !== undefined));
-  if (!available.length) {
-    host.append(make("p", "analytics-empty", "Views and engagement will appear after TikTok returns data for a public post."));
+  if (!data.available && data.reason) host.append(make("p", "analytics-empty", data.reason));
+  const posts = Array.isArray(data.posts) ? data.posts : [];
+  const summary = data.summary || {};
+  if (!posts.length) {
+    host.append(make("p", "analytics-empty", "Publish a video with Postmanager to start tracking its performance. TikTok returns these counts for public posts; private posts may have no data."));
     return;
   }
-  host.append(make("p", "analytics-source", "TikTok data for " + available.length + " of " + published.length + " published " + (published.length === 1 ? "post" : "posts") + "."));
+  host.append(make("p", "analytics-source", "Metrics available for " + (summary.posts_with_metrics || 0) + " of " + (summary.published_posts || posts.length) + " published posts." +
+    (summary.last_synced_at ? " Last sync " + formattedDate(summary.last_synced_at) + "." : " No metrics have been returned yet.")));
   const strip = make("div", "analytics-strip");
   for (const [label, key] of [
     ["Views", "view_count"], ["Likes", "like_count"],
     ["Comments", "comment_count"], ["Shares", "share_count"],
   ]) {
     const cell = make("div", "analytics-cell");
-    const complete = available.every((post) => post[key] !== null && post[key] !== undefined);
-    const total = complete ? available.reduce((sum, post) => sum + Number(post[key]), 0) : null;
-    cell.append(make("span", "", label), make("strong", "", complete ? numberFormat.format(total) : "—"));
+    cell.append(make("span", "", label), make("strong", "", metric(summary.totals?.[key])));
     strip.append(cell);
   }
   host.append(strip);
+  host.append(make("p", "field-help analytics-note", "Totals cover posts with returned data. A dash means unavailable, not zero. Existing counts stay visible when TikTok cannot return a new reading."));
+  const listing = make("div", "analytics-posts");
+  for (const post of posts) {
+    const section = make("article", "analytics-post");
+    section.append(make("h3", "", post.title || "Untitled post"));
+    const counts = make("div", "post-metrics");
+    for (const [label, key] of [["Views", "view_count"], ["Likes", "like_count"], ["Comments", "comment_count"], ["Shares", "share_count"]]) {
+      const item = make("span");
+      item.append(make("strong", "", metric(post[key])), " " + label);
+      counts.append(item);
+    }
+    section.append(counts);
+    section.append(make("p", "field-help analytics-note", post.analytics_synced_at
+      ? "Last successful sync " + formattedDate(post.analytics_synced_at) + (post.stale ? ". These counts may be out of date." : ".")
+      : "No metrics returned yet. Private posts and posts still processing may have no available counts."));
+    if (post.analytics_error) section.append(make("p", "post-error", post.analytics_error));
+    if (Array.isArray(post.snapshots) && post.snapshots.length) {
+      const history = make("details", "metric-history");
+      history.append(make("summary", "", "Metric history (" + post.snapshots.length + " readings)"));
+      const scroll = make("div", "table-scroll");
+      scroll.tabIndex = 0;
+      scroll.setAttribute("role", "region");
+      scroll.setAttribute("aria-label", "Metric history for " + (post.title || "untitled post"));
+      const table = make("table", "metrics-table");
+      const caption = make("caption", "", "Recorded TikTok metrics for " + (post.title || "untitled post"));
+      const thead = make("thead");
+      const headings = make("tr");
+      for (const label of ["Recorded (EAT)", "Views", "Likes", "Comments", "Shares"]) {
+        const heading = make("th", "", label);
+        heading.scope = "col";
+        headings.append(heading);
+      }
+      thead.append(headings);
+      const tbody = make("tbody");
+      for (const snapshot of post.snapshots) {
+        const tr = make("tr");
+        tr.append(make("td", "", formattedDate(snapshot.captured_at)));
+        for (const key of ["view_count", "like_count", "comment_count", "share_count"]) tr.append(make("td", "", metric(snapshot[key])));
+        tbody.append(tr);
+      }
+      table.append(caption, thead, tbody);
+      scroll.append(table);
+      history.append(scroll);
+      section.append(history);
+    }
+    listing.append(section);
+  }
+  host.append(listing);
+  if (data.truncated) host.append(make("p", "field-help analytics-note", "Showing the 100 most recent published posts."));
 }
 
 $("phoneForm").addEventListener("submit", async (event) => {
@@ -718,7 +932,7 @@ $("codeForm").addEventListener("submit", async (event) => {
     $("accountPhone").textContent = user.phone || state.phone;
     $("code").value = "";
     show("app");
-    await Promise.allSettled([loadTikTok(), loadMediaStatus(), loadSettings(), loadPosts()]);
+    await Promise.allSettled([loadTikTok(), loadMediaStatus(), loadSettings(), loadPosts(), loadAnalytics()]);
   } catch (error) {
     message("authMessage", error.message, "error");
   } finally {
@@ -740,6 +954,9 @@ $("logoutButton").addEventListener("click", async () => {
     state.posts = null;
     state.tiktok = { connected: false, configured: true };
     state.creatorInfo = null;
+    state.analytics = null;
+    state.analyticsError = "";
+    clearTimeout(plannerPoll);
     state.mediaConfigured = false;
     state.mediaStatusError = "";
     resetComposer();
@@ -802,6 +1019,8 @@ $("videoFile").addEventListener("change", () => {
   }
 });
 $("commercialDisclosure").addEventListener("change", renderCommercialOptions);
+$("brandOrganic").addEventListener("change", updateCommercialLabel);
+$("brandContent").addEventListener("change", updateCommercialLabel);
 $("draftPreview").addEventListener("loadedmetadata", () => {
   const seconds = Math.ceil($("draftPreview").duration);
   if (!$("durationSeconds").value && Number.isFinite(seconds) && seconds > 0) $("durationSeconds").value = String(seconds);
@@ -853,7 +1072,18 @@ $("draftForm").addEventListener("submit", async (event) => {
 });
 
 $("refreshPlanner").addEventListener("click", async () => {
-  await Promise.allSettled([loadTikTok(), loadMediaStatus(), loadPosts()]);
+  $("refreshPlanner").disabled = true;
+  try {
+    await Promise.allSettled([loadTikTok(), loadMediaStatus(), loadPosts(), loadAnalytics()]);
+  } finally { $("refreshPlanner").disabled = false; }
+});
+$("refreshAnalytics").addEventListener("click", () => loadAnalytics(true));
+$("refreshTikTok").addEventListener("click", async () => {
+  $("refreshTikTok").disabled = true;
+  try {
+    await loadTikTok();
+    await loadAnalytics();
+  } finally { $("refreshTikTok").disabled = false; }
 });
 $("plannerTabs").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-filter]");

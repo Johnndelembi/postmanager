@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHmac, randomBytes, timingSafeEq
 
 import { getPool } from "./db.js";
 import { ApiError, json } from "./http.js";
+import { deliveryConfigured } from "./delivery.js";
 
 const API_BASE = "https://open.tiktokapis.com";
 const AUTHORIZE_URL = "https://www.tiktok.com/v2/auth/authorize/";
@@ -25,7 +26,7 @@ function requiredEnv(name: string): string {
 }
 
 function requestedScopes(): string[] {
-  const optional = (process.env.TIKTOK_SCOPES ?? "").split(",").map((scope) => scope.trim()).filter(Boolean);
+  const optional = (process.env.TIKTOK_SCOPES ?? "video.publish,video.list").split(",").map((scope) => scope.trim()).filter(Boolean);
   if (optional.some((scope) => !OPTIONAL_SCOPES.has(scope))) {
     throw new ApiError(503, "TIKTOK_SCOPES may contain only video.publish and video.list.");
   }
@@ -160,6 +161,7 @@ function configured(request: Request): boolean {
     requiredEnv("TIKTOK_CLIENT_SECRET");
     encryptionKey();
     sessionSecret();
+    requestedScopes();
     return true;
   } catch (error) {
     if (error instanceof ApiError) return false;
@@ -184,11 +186,26 @@ function tokenSet(value: Record<string, unknown>): TokenSet {
 }
 
 function errorStatus(code: string, httpStatus: number): number {
-  if (code === "rate_limit_exceeded") return 429;
+  if (["rate_limit_exceeded", "spam_risk_too_many_posts", "reached_active_user_cap"].includes(code)) return 429;
   if (code === "access_token_invalid" || code === "invalid_grant") return 401;
   if (code === "scope_not_authorized" || code === "unauthorized_client") return 403;
+  if (["invalid_param", "privacy_level_option_mismatch", "invalid_request"].includes(code)) return 400;
   if (httpStatus >= 400 && httpStatus < 500) return httpStatus;
   return 502;
+}
+
+export class TikTokApiError extends ApiError {
+  constructor(readonly code: string, message: string, status = 502, readonly uncertain = false) {
+    super(status, message);
+    this.name = "TikTokApiError";
+  }
+}
+
+export function parseTikTokJson(raw: string): unknown {
+  // TikTok status responses can contain numeric int64 post IDs beyond JavaScript's safe range.
+  const preserved = raw.replace(/"(?:\\.|[^"\\])*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g, (token) =>
+    /^-?\d+$/.test(token) && !Number.isSafeInteger(Number(token)) ? JSON.stringify(token) : token);
+  return JSON.parse(preserved);
 }
 
 async function tikTokRequest(path: string, init: RequestInit): Promise<Record<string, unknown>> {
@@ -196,23 +213,24 @@ async function tikTokRequest(path: string, init: RequestInit): Promise<Record<st
   try {
     response = await fetch(`${API_BASE}${path}`, { ...init, redirect: "manual", signal: AbortSignal.timeout(20_000) });
   } catch {
-    throw new ApiError(503, "TikTok could not be reached right now.");
+    throw new TikTokApiError("network_error", "TikTok could not be reached right now.", 503, true);
   }
   let data: unknown;
   try {
-    data = await response.json();
+    data = parseTikTokJson(await response.text());
   } catch {
-    throw new ApiError(502, "TikTok returned an unreadable response.");
+    throw new TikTokApiError("invalid_response", "TikTok returned an unreadable response.", 502, true);
   }
   if (!data || typeof data !== "object" || Array.isArray(data)) {
-    throw new ApiError(502, "TikTok returned an unexpected response.");
+    throw new TikTokApiError("invalid_response", "TikTok returned an unexpected response.", 502, true);
   }
   const result = data as Record<string, unknown>;
   const error = result.error;
   const code = typeof error === "string" ? error :
     error && typeof error === "object" && "code" in error ? String(error.code) : "";
   if ((code && code !== "ok") || !response.ok) {
-    throw new ApiError(errorStatus(code, response.status), code ? `TikTok rejected the request (${code}).` : "TikTok rejected the request.");
+    throw new TikTokApiError(code || "http_error", code ? `TikTok rejected the request (${code}).` : "TikTok rejected the request.",
+      errorStatus(code, response.status), response.status >= 500 || code === "internal_error");
   }
   return result;
 }
@@ -266,17 +284,18 @@ async function saveAccount(userId: number, tokens: TokenSet, profile: { open_id:
     await getPool().query(
       `INSERT INTO tiktok_accounts
          (user_id, open_id, username, access_token_ciphertext, refresh_token_ciphertext,
-          access_expires_at, refresh_expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+          access_expires_at, refresh_expires_at, granted_scopes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (user_id) DO UPDATE SET
          open_id = EXCLUDED.open_id, username = EXCLUDED.username,
          access_token_ciphertext = EXCLUDED.access_token_ciphertext,
          refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
          access_expires_at = EXCLUDED.access_expires_at,
-         refresh_expires_at = EXCLUDED.refresh_expires_at, updated_at = now()`,
+         refresh_expires_at = EXCLUDED.refresh_expires_at,
+         granted_scopes = EXCLUDED.granted_scopes, updated_at = now()`,
       [userId, tokens.open_id, profile.display_name || null,
         encryptTikTokToken(tokens.access_token), encryptTikTokToken(tokens.refresh_token),
-        new Date(now + tokens.expires_in * 1000), new Date(now + tokens.refresh_expires_in * 1000)],
+        new Date(now + tokens.expires_in * 1000), new Date(now + tokens.refresh_expires_in * 1000), parseScopes(tokens.scope)],
     );
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "23505") {
@@ -286,24 +305,56 @@ async function saveAccount(userId: number, tokens: TokenSet, profile: { open_id:
   }
 }
 
-async function accessToken(userId: number): Promise<string> {
+function parseScopes(value: string): string[] {
+  return [...new Set(value.split(",").map((scope) => scope.trim()).filter(Boolean))];
+}
+
+export type TikTokAccount = {
+  connected: boolean;
+  open_id: string | null;
+  username: string | null;
+  scopes: string[];
+  authorization_expired: boolean;
+};
+
+export async function getTikTokAccount(userId: number): Promise<TikTokAccount> {
+  const result = await getPool().query<{
+    open_id: string; username: string | null; granted_scopes: string[]; refresh_expires_at: Date;
+  }>("SELECT open_id, username, granted_scopes, refresh_expires_at FROM tiktok_accounts WHERE user_id = $1", [userId]);
+  const account = result.rows[0];
+  return {
+    connected: Boolean(account), open_id: account?.open_id ?? null, username: account?.username ?? null,
+    scopes: account?.granted_scopes ?? [],
+    authorization_expired: Boolean(account && new Date(account.refresh_expires_at).getTime() <= Date.now()),
+  };
+}
+
+async function accessToken(userId: number, scope?: string, expectedOpenId?: string): Promise<string> {
   const client = await getPool().connect();
+  let committed = false;
   try {
     await client.query("BEGIN");
     const result = await client.query<{
       open_id: string; access_token_ciphertext: string; refresh_token_ciphertext: string;
-      access_expires_at: Date; refresh_expires_at: Date;
+      access_expires_at: Date; refresh_expires_at: Date; granted_scopes: string[];
     }>(
       `SELECT open_id, access_token_ciphertext, refresh_token_ciphertext,
-              access_expires_at, refresh_expires_at
+              access_expires_at, refresh_expires_at, granted_scopes
          FROM tiktok_accounts WHERE user_id = $1 FOR UPDATE`,
       [userId],
     );
     const account = result.rows[0];
     if (!account) throw new ApiError(409, "Connect a TikTok account first.");
+    if (expectedOpenId && account.open_id !== expectedOpenId) {
+      throw new ApiError(409, "The connected TikTok account changed. Review the post for this account before publishing.");
+    }
+    if (scope && !account.granted_scopes?.includes(scope)) {
+      throw new ApiError(403, `Reconnect TikTok and authorize ${scope} access first.`);
+    }
     if (new Date(account.access_expires_at).getTime() > Date.now() + 120_000) {
       const token = decryptTikTokToken(account.access_token_ciphertext);
       await client.query("COMMIT");
+      committed = true;
       return token;
     }
     if (new Date(account.refresh_expires_at).getTime() <= Date.now()) {
@@ -314,30 +365,40 @@ async function accessToken(userId: number): Promise<string> {
     const now = Date.now();
     await client.query(
       `UPDATE tiktok_accounts SET access_token_ciphertext = $1, refresh_token_ciphertext = $2,
-         access_expires_at = $3, refresh_expires_at = $4, updated_at = now() WHERE user_id = $5`,
+         access_expires_at = $3, refresh_expires_at = $4, granted_scopes = $5, updated_at = now() WHERE user_id = $6`,
       [encryptTikTokToken(tokens.access_token), encryptTikTokToken(tokens.refresh_token),
-        new Date(now + tokens.expires_in * 1000), new Date(now + tokens.refresh_expires_in * 1000), userId],
+        new Date(now + tokens.expires_in * 1000), new Date(now + tokens.refresh_expires_in * 1000), parseScopes(tokens.scope), userId],
     );
     await client.query("COMMIT");
+    committed = true;
+    if (scope && !parseScopes(tokens.scope).includes(scope)) {
+      throw new ApiError(403, `TikTok no longer grants ${scope} access. Reconnect the account.`);
+    }
     return tokens.access_token;
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (!committed) await client.query("ROLLBACK");
     throw error;
   } finally {
     client.release();
   }
 }
 
-async function creatorInfo(userId: number): Promise<Record<string, unknown>> {
-  const token = await accessToken(userId);
-  const result = await tikTokRequest("/v2/post/publish/creator_info/query/", {
-    method: "POST",
+export async function tikTokApi(userId: number, path: string, payload?: Record<string, unknown>, method = "POST", expectedOpenId?: string): Promise<Record<string, unknown>> {
+  const scope = path.startsWith("/v2/post/publish/") ? "video.publish" : path.startsWith("/v2/video/") ? "video.list" : undefined;
+  const token = await accessToken(userId, scope, expectedOpenId);
+  const result = await tikTokRequest(path, {
+    method,
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=UTF-8" },
+    body: payload === undefined ? undefined : JSON.stringify(payload),
   });
   if (!result.data || typeof result.data !== "object" || Array.isArray(result.data)) {
-    throw new ApiError(502, "TikTok returned no creator details.");
+    throw new TikTokApiError("invalid_response", "TikTok returned no data.", 502, true);
   }
   return result.data as Record<string, unknown>;
+}
+
+export async function creatorInfo(userId: number, expectedOpenId?: string): Promise<Record<string, unknown>> {
+  return tikTokApi(userId, "/v2/post/publish/creator_info/query/", undefined, "POST", expectedOpenId);
 }
 
 export async function handleTikTok(request: Request, userId: number, pathname: string): Promise<Response | null> {
@@ -348,19 +409,21 @@ export async function handleTikTok(request: Request, userId: number, pathname: s
   if (request.method !== "GET") throw new ApiError(405, "Method not allowed.");
 
   if (pathname === "/api/tiktok/status") {
-    const account = await getPool().query<{ username: string | null }>(
-      "SELECT username FROM tiktok_accounts WHERE user_id = $1", [userId],
-    );
-    const connected = account.rows.length > 0;
+    const account = await getTikTokAccount(userId);
+    const connected = account.connected;
     const https = new URL(request.url).protocol === "https:";
     const ready = configured(request);
-    const creatorInfoReady = ready && requestedScopes().includes("video.publish");
+    const creatorInfoReady = ready && connected && !account.authorization_expired && account.scopes.includes("video.publish");
+    const analyticsReady = ready && connected && !account.authorization_expired && account.scopes.includes("video.list");
     return json(200, {
       connected,
-      username: account.rows[0]?.username ?? null,
+      username: account.username,
+      scopes: account.scopes,
       configured: ready,
-      publishing_ready: false,
+      publishing_ready: creatorInfoReady && deliveryConfigured(),
       creator_info_ready: creatorInfoReady,
+      analytics_ready: analyticsReady,
+      reconnect_required: connected && (account.authorization_expired || (ready && requestedScopes().some((scope) => !account.scopes.includes(scope)))),
       audited: process.env.TIKTOK_APP_AUDITED === "1",
       setup_stage: !https ? "awaiting_https" : !ready ? "configure_tiktok" : !connected ? "connect_tiktok" : "connected",
     });
