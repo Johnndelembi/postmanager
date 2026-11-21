@@ -7,7 +7,7 @@ import { ApiError } from "../netlify/lib/http.js";
 import { decryptTikTokToken, encryptTikTokToken, handleTikTok } from "../netlify/lib/tiktok.js";
 import handler from "../netlify/functions/api.js";
 
-const ORIGIN = "https://postgeek.netlify.app";
+const ORIGIN = "https://creator.example";
 // Published Fernet acceptance vector: https://github.com/fernet/spec/blob/master/verify.json
 const FERNET_KEY = "cw_0x689RpI-jtRR7oE8h_eQsKImvJapLeSbXpwF4e4=";
 const FERNET_TOKEN = "gAAAAAAdwJ6wAAECAwQFBgcICQoLDA0ODy021cpGVWKZ_eEwCGM4BLLF_5CV9dOPmrhuVUPgJobwOz7JcbmrR64jVmpU4IwqDA==";
