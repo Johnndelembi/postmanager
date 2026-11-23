@@ -5,7 +5,7 @@ import { videoCounts } from "./analytics.js";
 
 const PAGE_SIZE = 20;
 const LATEST_COOLDOWN_SECONDS = 60;
-const METRIC_REFRESH_SECONDS = 6 * 60 * 60;
+const METRIC_REFRESH_COOLDOWN_SECONDS = 60;
 const VIDEO_FIELDS = [
   "id", "create_time", "cover_image_url", "share_url", "video_description", "duration", "title", "embed_link",
   "view_count", "like_count", "comment_count", "share_count",
@@ -271,14 +271,14 @@ async function refreshAccountMetrics(userId: number): Promise<Record<string, unk
      ) UPDATE tiktok_account_videos AS v SET metrics_checked_at = now()
        FROM due WHERE v.user_id = $1 AND v.open_id = $2 AND v.video_id = due.video_id
        RETURNING v.video_id`,
-    [userId, account.open_id, METRIC_REFRESH_SECONDS, PAGE_SIZE],
+    [userId, account.open_id, METRIC_REFRESH_COOLDOWN_SECONDS, PAGE_SIZE],
   );
   if (!rows.rows.length) {
     const status = await getPool().query<{ count: string; retry_after: number | null }>(
       `SELECT count(*) AS count,
          ceil(greatest(0, extract(epoch FROM (min(metrics_checked_at) + ($3 * interval '1 second') - now())))::numeric)::int AS retry_after
        FROM tiktok_account_videos WHERE user_id = $1 AND open_id = $2`,
-      [userId, account.open_id, METRIC_REFRESH_SECONDS],
+      [userId, account.open_id, METRIC_REFRESH_COOLDOWN_SECONDS],
     );
     const count = Number(status.rows[0]?.count ?? 0);
     return { checked: 0, updated: 0, unavailable: 0, cooldown: count > 0, retry_after: status.rows[0]?.retry_after ?? 0, no_posts: count === 0 };
