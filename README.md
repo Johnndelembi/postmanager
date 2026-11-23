@@ -33,7 +33,7 @@ Postmanager is a TikTok-first creation and publishing workspace for Tanzanian cr
 
 The existing `postmanager` Neon project's pooled URL is configured in the ignored `.env` file. Use `DATABASE_URL` for normal application queries. When migrations are introduced, add a direct connection as `DATABASE_URL_UNPOOLED`; schema migrations should use that direct URL. Copy the variable names from `.env.example` and keep their values private.
 
-Migrations live in `db/migrations`. The original authentication, planner, and media migrations are applied on the `postmanager-mvp` development branch and main. Migration `004_publishing.sql` was checked on the isolated `postmanager-publishing-analytics` branch and applied on main. Migration `005_tiktok_account_videos.sql` was checked on an isolated branch and applied to the production branch used by the configured database URL; apply it to other branches before running this version. The ignored `.env` contains a branch-scoped storage credential and locally generated session and token-encryption keys.
+Migrations live in `db/migrations`. The original authentication, planner, and media migrations are applied on the `postmanager-mvp` development branch and the `production` branch. Migration `004_publishing.sql` was checked on the isolated `postmanager-publishing-analytics` branch and applied on `production`. Migration `005_tiktok_account_videos.sql` was checked on an isolated branch and applied to `production`; apply it to other branches before running this version. The ignored `.env` contains a branch-scoped storage credential and locally generated session and token-encryption keys.
 
 ## TikTok integration
 
