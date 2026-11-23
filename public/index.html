@@ -82,6 +82,12 @@
         </aside>
 
         <div class="workspace">
+          <nav class="workspace-nav" aria-label="Workspace pages">
+            <button id="showPlannerPage" class="workspace-nav-item active" type="button" aria-pressed="true">Planner</button>
+            <button id="showAccountPage" class="workspace-nav-item" type="button" aria-pressed="false">TikTok account</button>
+          </nav>
+
+          <div id="plannerPage">
           <div class="workspace-heading">
             <div>
               <h1>Your TikTok planner</h1>
@@ -193,10 +199,35 @@
                 <h2 id="analyticsHeading">Performance</h2>
                 <p>Views, likes, comments, and shares for public posts sent with Postmanager.</p>
               </div>
-              <button id="refreshAnalytics" type="button" class="button button-secondary button-small">Sync TikTok metrics</button>
+              <button id="refreshAnalytics" type="button" class="button button-secondary button-small">Sync Postmanager posts</button>
             </div>
             <p id="analyticsMessage" class="message" role="status" aria-live="polite"></p>
             <div id="analyticsContent" aria-live="polite"></div>
+          </section>
+          </div>
+          <section id="accountPage" class="account-page" aria-labelledby="accountPageHeading" hidden>
+            <div class="workspace-heading">
+              <div>
+                <h1 id="accountPageHeading">Your TikTok account</h1>
+                <p id="accountPageIntro">Public videos from the account you connected, including videos posted outside Postmanager.</p>
+              </div>
+              <span id="accountVideoCount" class="post-count"></span>
+            </div>
+            <div class="account-sync-bar">
+              <div>
+                <p id="accountSyncMessage" class="message" role="status" aria-live="polite"></p>
+                <p class="field-help">TikTok only returns public posts. Your drafts and private videos stay out of this list.</p>
+              </div>
+              <div class="account-sync-actions">
+                <button id="syncAccountVideos" type="button" class="button button-secondary">Sync account posts</button>
+                <button id="refreshAccountMetrics" type="button" class="button button-quiet button-small">Refresh metrics</button>
+              </div>
+            </div>
+            <div id="accountVideoSummary" aria-live="polite"></div>
+            <div id="accountVideoContent" aria-live="polite"></div>
+            <div class="account-more-row">
+              <button id="loadOlderVideos" type="button" class="button button-quiet" hidden>Load older posts</button>
+            </div>
           </section>
           <footer class="workspace-footer"><a href="/about/">About</a><a href="/privacy/">Privacy Policy</a><a href="/terms/">Terms of Service</a></footer>
         </div>

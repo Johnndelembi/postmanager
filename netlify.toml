@@ -22,4 +22,4 @@
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
     X-Frame-Options = "DENY"
-    Content-Security-Policy = "default-src 'self'; img-src 'self' https: data:; media-src 'self' https: blob:; connect-src 'self' https:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'"
+    Content-Security-Policy = "default-src 'self'; img-src 'self' https: data:; media-src 'self' https: blob:; connect-src 'self' https:; frame-src https://www.tiktok.com; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'"

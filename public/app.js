@@ -17,6 +17,16 @@ const state = {
   creatorInfo: null,
   analytics: null,
   analyticsError: "",
+  accountVideos: null,
+  accountVideoSummary: null,
+  accountVideoAvailable: false,
+  accountVideoReason: "",
+  accountVideoHasCachedMore: false,
+  accountVideoHasRemoteMore: false,
+  accountVideoInitialized: false,
+  accountVideoError: "",
+  accountVideoAutoStarted: false,
+  accountVideoSyncing: false,
   settings: { timezone: "Africa/Dar_es_Salaam", queue_times: [] },
 };
 let plannerPoll;
@@ -104,12 +114,17 @@ function metric(value) {
   return value === null || value === undefined ? "—" : numberFormat.format(Number(value));
 }
 
+function accountMetric(value) {
+  if (value === null || value === undefined) return "—";
+  try { return numberFormat.format(BigInt(value)); } catch { return "—"; }
+}
+
 async function start() {
   try {
     const user = await api("/api/me");
     $("accountPhone").textContent = user.phone || "";
     show("app");
-    await Promise.allSettled([loadTikTok(), loadMediaStatus(), loadSettings(), loadPosts(), loadAnalytics()]);
+    await Promise.allSettled([loadTikTok(), loadMediaStatus(), loadSettings(), loadPosts(), loadAnalytics(), loadTikTokVideos(true)]);
   } catch (error) {
     show("auth");
     if (error.status !== 401) message("authMessage", error.message, "error");
@@ -156,6 +171,29 @@ async function loadTikTok() {
     $("connectTikTok").hidden = false;
     state.creatorInfo = null;
     applyCreatorInfo();
+  }
+}
+
+async function loadTikTokVideos(autoImport = false) {
+  try {
+    const data = await api("/api/tiktok/videos?offset=0");
+    state.accountVideos = Array.isArray(data.videos) ? data.videos : [];
+    state.accountVideoSummary = data.summary || null;
+    state.accountVideoAvailable = data.available === true;
+    state.accountVideoReason = data.reason || "";
+    state.accountVideoHasCachedMore = data.page?.has_cached_more === true;
+    state.accountVideoHasRemoteMore = data.sync?.has_more === true;
+    state.accountVideoInitialized = data.initialized === true;
+    state.accountVideoError = "";
+    renderTikTokVideos(data);
+    if (autoImport && data.available && !data.initialized && !state.accountVideoAutoStarted) {
+      state.accountVideoAutoStarted = true;
+      await syncTikTokAccountVideos(false);
+    }
+  } catch (error) {
+    state.accountVideos = null;
+    state.accountVideoError = error.message;
+    renderTikTokVideos();
   }
 }
 
@@ -324,7 +362,7 @@ async function loadAnalytics(sync = false) {
     state.analyticsError = error.message;
     if (sync) message("analyticsMessage", error.message, "error");
   } finally {
-    button.textContent = "Sync TikTok metrics";
+    button.textContent = "Sync Postmanager posts";
     renderAnalytics();
   }
 }
@@ -365,6 +403,237 @@ function emptyState(title, detail) {
   const node = make("div", "empty-state");
   node.append(make("h3", "", title), make("p", "", detail));
   return node;
+}
+
+function safeTikTokUrl(value, hosts) {
+  if (typeof value !== "string") return "";
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password || url.port) return "";
+    return hosts.some((host) => url.hostname === host || url.hostname.endsWith("." + host)) ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+function renderTikTokVideos() {
+  const summaryHost = $("accountVideoSummary");
+  const content = $("accountVideoContent");
+  summaryHost.replaceChildren();
+  content.replaceChildren();
+  const videos = state.accountVideos;
+  const summary = state.accountVideoSummary;
+  const total = Number(summary?.video_count || 0);
+  $("accountVideoCount").textContent = total ? total + (total === 1 ? " public post" : " public posts") : "";
+  $("syncAccountVideos").disabled = !state.accountVideoAvailable || state.accountVideoSyncing;
+  $("refreshAccountMetrics").disabled = !state.accountVideoAvailable || state.accountVideoSyncing || !total;
+  if (state.accountVideoError) {
+    content.append(make("p", "account-video-empty", "TikTok posts could not be loaded: " + state.accountVideoError));
+    $("loadOlderVideos").hidden = true;
+    return;
+  }
+  if (!state.accountVideoAvailable) {
+    content.append(make("p", "account-video-empty", state.accountVideoReason || "Connect TikTok to see your public account posts."));
+    $("loadOlderVideos").hidden = true;
+    return;
+  }
+  if (summary) {
+    const strip = make("div", "analytics-strip account-video-totals");
+    for (const [label, key] of [["Views", "view_count"], ["Likes", "like_count"], ["Comments", "comment_count"], ["Shares", "share_count"]]) {
+      const cell = make("div", "analytics-cell");
+      cell.append(make("span", "", label), make("strong", "", accountMetric(summary.totals?.[key])));
+      strip.append(cell);
+    }
+    summaryHost.append(strip);
+    summaryHost.append(make("p", "analytics-source", "Metrics returned for " + (summary.videos_with_metrics || 0) + " of " + total + " synced public posts." +
+      (summary.last_synced_at ? " Last updated " + formattedDate(summary.last_synced_at) + "." : "")));
+  }
+  if (videos === null) {
+    content.append(emptyState("Loading TikTok posts", "Your public account videos will appear here."));
+  } else if (!videos.length) {
+    content.append(emptyState(state.accountVideoInitialized ? "No public posts found" : "Syncing your account", state.accountVideoInitialized
+      ? "TikTok did not return public videos for this account. Private and draft videos are not available through this list."
+      : "Postmanager is checking your TikTok account for public videos."));
+  } else {
+    const grid = make("div", "account-video-grid");
+    for (const video of videos) grid.append(accountVideoCard(video));
+    content.append(grid);
+  }
+  $("loadOlderVideos").hidden = !state.accountVideoHasCachedMore && !state.accountVideoHasRemoteMore;
+  $("loadOlderVideos").disabled = state.accountVideoSyncing;
+}
+
+function accountVideoCard(video) {
+  const card = make("article", "account-video-card");
+  const coverUrl = safeTikTokUrl(video.cover_image_url, ["tiktokcdn.com", "tiktokcdn-us.com", "tiktokcdn-eu.com", "tiktokcdn-in.com"]);
+  if (coverUrl) {
+    const image = make("img", "account-video-cover");
+    image.src = coverUrl;
+    image.alt = "Cover for " + (video.title || video.video_description || "TikTok video");
+    image.loading = "lazy";
+    image.addEventListener("error", () => image.replaceWith(make("div", "account-video-cover empty", "Preview unavailable")), { once: true });
+    card.append(image);
+  } else {
+    card.append(make("div", "account-video-cover empty", "Preview unavailable"));
+  }
+
+  const body = make("div", "account-video-body");
+  body.append(make("h3", "", video.title || video.video_description || "TikTok video"));
+  body.append(make("p", "account-video-date", formattedDate(video.create_time) || "Date unavailable"));
+  const counts = make("div", "account-video-metrics");
+  for (const [label, key] of [["Views", "view_count"], ["Likes", "like_count"], ["Comments", "comment_count"], ["Shares", "share_count"]]) {
+    const item = make("span");
+    item.append(make("strong", "", accountMetric(video[key])), " " + label);
+    counts.append(item);
+  }
+  body.append(counts);
+  if (video.metrics_error) body.append(make("p", "post-error", video.metrics_error));
+  else if (!video.metrics_synced_at) body.append(make("p", "field-help analytics-note", "TikTok has not returned public counts for this video yet."));
+  const actions = make("div", "account-video-actions");
+  const embedUrl = safeTikTokUrl(video.embed_link, ["tiktok.com"]);
+  if (embedUrl) {
+    const toggle = make("button", "button-link", "Play here");
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.addEventListener("click", () => {
+      const player = body.querySelector("iframe");
+      if (player) {
+        player.remove();
+        toggle.textContent = "Play here";
+        toggle.setAttribute("aria-expanded", "false");
+      } else {
+        const frame = make("iframe", "account-video-player");
+        frame.src = embedUrl;
+        frame.title = "TikTok video: " + (video.title || video.video_description || "video");
+        frame.loading = "lazy";
+        frame.referrerPolicy = "strict-origin-when-cross-origin";
+        frame.allow = "encrypted-media; fullscreen";
+        body.insertBefore(frame, actions);
+        toggle.textContent = "Close preview";
+        toggle.setAttribute("aria-expanded", "true");
+      }
+    });
+    actions.append(toggle);
+  }
+  const shareUrl = safeTikTokUrl(video.share_url, ["tiktok.com"]);
+  if (shareUrl) {
+    const link = make("a", "", "View on TikTok");
+    link.href = shareUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    actions.append(link);
+  }
+  if (actions.childNodes.length) body.append(actions);
+  card.append(body);
+  return card;
+}
+
+async function loadCachedTikTokVideoPage() {
+  const offset = state.accountVideos?.length || 0;
+  const data = await api("/api/tiktok/videos?offset=" + offset);
+  const seen = new Set((state.accountVideos || []).map((video) => video.video_id));
+  state.accountVideos = [...(state.accountVideos || []), ...(data.videos || []).filter((video) => !seen.has(video.video_id))];
+  state.accountVideoSummary = data.summary || state.accountVideoSummary;
+  state.accountVideoHasCachedMore = data.page?.has_cached_more === true;
+  state.accountVideoHasRemoteMore = data.sync?.has_more === true;
+  state.accountVideoInitialized = data.initialized === true;
+  renderTikTokVideos();
+  return (data.videos || []).length;
+}
+
+async function syncTikTokAccountVideos(older = false) {
+  const button = older ? $("loadOlderVideos") : $("syncAccountVideos");
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = older ? "Loading…" : "Syncing…";
+  state.accountVideoSyncing = true;
+  if (!older) message("accountSyncMessage", "Checking your public TikTok posts…");
+  renderTikTokVideos();
+  try {
+    if (older && state.accountVideoHasCachedMore) {
+      const loaded = await loadCachedTikTokVideoPage();
+      message("accountSyncMessage", loaded ? "Loaded " + loaded + " older posts already synced from TikTok." : "No more cached posts.", "success");
+      return;
+    }
+    if (older && !state.accountVideoHasRemoteMore) {
+      message("accountSyncMessage", "There are no older public posts to load.");
+      return;
+    }
+    const result = await api("/api/tiktok/videos/sync", { method: "POST", body: { older } });
+    const sync = result.sync || {};
+    if (older) {
+      if (sync.no_more) {
+        state.accountVideoHasRemoteMore = false;
+        message("accountSyncMessage", "There are no older public posts to load.");
+      } else if (sync.busy) {
+        message("accountSyncMessage", "An older-post sync is already in progress. Try again in a moment.");
+      } else {
+        const loaded = await loadCachedTikTokVideoPage();
+        message("accountSyncMessage", loaded
+          ? "Loaded " + loaded + " older TikTok posts."
+          : "TikTok did not return any older public posts.", "success");
+      }
+    } else {
+      await loadTikTokVideos(false);
+      if (sync.cooldown) {
+        message("accountSyncMessage", "TikTok posts were checked recently. Try again in " + sync.retry_after + " seconds.");
+      } else if (sync.busy) {
+        message("accountSyncMessage", "A TikTok sync is already in progress. Refresh this page in a moment.");
+      } else if (!sync.checked && sync.no_more) {
+        message("accountSyncMessage", "TikTok did not return public posts for this account.");
+      } else {
+        const count = Number(sync.checked || 0);
+        message("accountSyncMessage", count
+          ? "Synced " + count + " recent TikTok " + (count === 1 ? "post" : "posts") + ". Load older posts to continue browsing your account history."
+          : "Your account posts are up to date.", "success");
+      }
+    }
+  } catch (error) {
+    message("accountSyncMessage", error.message, "error");
+  } finally {
+    state.accountVideoSyncing = false;
+    button.disabled = false;
+    button.textContent = original;
+    renderTikTokVideos();
+  }
+}
+
+async function refreshTikTokAccountMetrics() {
+  const button = $("refreshAccountMetrics");
+  state.accountVideoSyncing = true;
+  renderTikTokVideos();
+  const visibleCount = state.accountVideos?.length || 0;
+  message("accountSyncMessage", "Refreshing counts for your synced account videos…");
+  try {
+    const result = await api("/api/tiktok/videos/metrics", { method: "POST", body: {} });
+    const refresh = result.refresh || {};
+    await loadTikTokVideos(false);
+    while ((state.accountVideos?.length || 0) < visibleCount && state.accountVideoHasCachedMore) {
+      const loaded = await loadCachedTikTokVideoPage();
+      if (!loaded) break;
+    }
+    if (refresh.cooldown) message("accountSyncMessage", "Account post metrics were checked recently. Try again in " + refresh.retry_after + " seconds.");
+    else if (refresh.no_posts) message("accountSyncMessage", "Sync your account posts first to load public videos.");
+    else message("accountSyncMessage", "Refreshed metrics for " + (refresh.updated || 0) + " of " + (refresh.checked || 0) + " account posts." +
+      (refresh.unavailable ? " TikTok did not return counts for " + refresh.unavailable + "." : ""), "success");
+  } catch (error) {
+    message("accountSyncMessage", error.message, "error");
+  } finally {
+    state.accountVideoSyncing = false;
+    button.disabled = false;
+    renderTikTokVideos();
+  }
+}
+
+function showWorkspacePage(page) {
+  const account = page === "account";
+  $("plannerPage").hidden = account;
+  $("accountPage").hidden = !account;
+  $("showPlannerPage").classList.toggle("active", !account);
+  $("showPlannerPage").setAttribute("aria-pressed", String(!account));
+  $("showAccountPage").classList.toggle("active", account);
+  $("showAccountPage").setAttribute("aria-pressed", String(account));
+  if (account && state.accountVideos === null) loadTikTokVideos(true);
 }
 
 function readinessIssue(post) {
@@ -939,7 +1208,7 @@ $("codeForm").addEventListener("submit", async (event) => {
     $("accountPhone").textContent = user.phone || state.phone;
     $("code").value = "";
     show("app");
-    await Promise.allSettled([loadTikTok(), loadMediaStatus(), loadSettings(), loadPosts(), loadAnalytics()]);
+    await Promise.allSettled([loadTikTok(), loadMediaStatus(), loadSettings(), loadPosts(), loadAnalytics(), loadTikTokVideos(true)]);
   } catch (error) {
     message("authMessage", error.message, "error");
   } finally {
@@ -963,6 +1232,13 @@ $("logoutButton").addEventListener("click", async () => {
     state.creatorInfo = null;
     state.analytics = null;
     state.analyticsError = "";
+    state.accountVideos = null;
+    state.accountVideoSummary = null;
+    state.accountVideoAvailable = false;
+    state.accountVideoError = "";
+    state.accountVideoInitialized = false;
+    state.accountVideoAutoStarted = false;
+    showWorkspacePage("planner");
     clearTimeout(plannerPoll);
     state.mediaConfigured = false;
     state.mediaStatusError = "";
@@ -1085,10 +1361,16 @@ $("refreshPlanner").addEventListener("click", async () => {
   } finally { $("refreshPlanner").disabled = false; }
 });
 $("refreshAnalytics").addEventListener("click", () => loadAnalytics(true));
+$("showPlannerPage").addEventListener("click", () => showWorkspacePage("planner"));
+$("showAccountPage").addEventListener("click", () => showWorkspacePage("account"));
+$("syncAccountVideos").addEventListener("click", () => syncTikTokAccountVideos(false));
+$("loadOlderVideos").addEventListener("click", () => syncTikTokAccountVideos(true));
+$("refreshAccountMetrics").addEventListener("click", refreshTikTokAccountMetrics);
 $("refreshTikTok").addEventListener("click", async () => {
   $("refreshTikTok").disabled = true;
   try {
     await loadTikTok();
+    await loadTikTokVideos(true);
     await loadAnalytics();
   } finally { $("refreshTikTok").disabled = false; }
 });

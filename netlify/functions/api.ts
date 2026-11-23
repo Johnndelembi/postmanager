@@ -6,6 +6,7 @@ import { handleMedia } from '../lib/media.js';
 import { handlePlanner } from '../lib/posts.js';
 import { handleTikTok } from '../lib/tiktok.js';
 import { handleAnalytics } from '../lib/analytics.js';
+import { handleTikTokVideos } from '../lib/tiktok-videos.js';
 
 function normalizeRequest(request: Request): { request: Request; path: string } {
   const url = new URL(request.url);
@@ -43,6 +44,7 @@ export default async function handler(incoming: Request, _context: Context): Pro
 
     const user = await getAuthenticatedUser(request);
     let response: Response | null = await handleMedia(request, user.id, path);
+    if (!response) response = await handleTikTokVideos(request, user.id, path);
     if (!response) response = await handleTikTok(request, user.id, path);
     if (!response) response = await handleAnalytics(request, user.id, path);
     if (!response) response = await handlePlanner(request, user.id);
